@@ -18,6 +18,13 @@ import {
 // ---------- tiny utilities ----------
 const uid = () => Math.random().toString(36).slice(2, 10);
 const cls = (...a) => a.filter(Boolean).join(" ");
+// First initial + last initial, e.g. "Jane Brown" -> "JB". Single name -> first 2 letters.
+const initials = (name) => {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+};
 
 // ---------- Data layer (Supabase-ready, memory fallback) ----------
 // All reads/writes go through `db`. When a Supabase URL+key are saved,
@@ -396,7 +403,7 @@ function TableNode({ t, guests, onDown, onSeat, onRemove, onRename, onSeats }) {
                 color: g ? "#0a0a0a" : "var(--dim)",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
-              {g ? (g.checkedIn ? <Check size={13} /> : g.name.slice(0, 2).toUpperCase()) : i + 1}
+              {g ? (g.checkedIn ? <Check size={13} /> : initials(g.name)) : i + 1}
             </button>
           );
         })}
@@ -535,7 +542,7 @@ function GuestManager({ guests, tables, addGuest, updateGuest, removeGuest, assi
                 <td style={S.td}>
                   {g.checkedIn
                     ? <span style={S.tagOk}><Check size={12} /> In</span>
-                    : <button style={S.tagBtn} onClick={() => updateGuest(g.id, { checkedIn: true })}>Mark in</button>}
+                    : <button style={S.tagBtn} onClick={() => updateGuest(g.id, { checkedIn: true })}>Check-In</button>}
                 </td>
                 <td style={S.td}><button onClick={() => removeGuest(g.id)} style={S.iconBtn}><Trash2 size={15} /></button></td>
               </tr>
@@ -569,10 +576,52 @@ function QrCenter({ guests, tables, notify }) {
     a.click();
   };
 
-  const emailOne = (g) => {
+  const [sending, setSending] = useState(null); // guest id currently sending
+
+  const mailtoFallback = (g) => {
     const t = tables.find(x => x.id === g.tableId);
     const body = `Hi ${g.name},\n\nYou're confirmed for the event.\n${t ? `Your seat: ${t.name}, Seat ${g.seat + 1}\n` : ""}\nPlease present your QR code at check-in. Your code ID: ${g.token}\n\nSee you there!`;
     window.location.href = `mailto:${encodeURIComponent(g.email || "")}?subject=${encodeURIComponent("Your Event Check-In QR Code")}&body=${encodeURIComponent(body)}`;
+  };
+
+  const emailOne = async (g) => {
+    if (!g.email) { notify("No email on file for " + g.name); return; }
+    setSending(g.id);
+    const t = tables.find(x => x.id === g.tableId);
+    try {
+      const res = await fetch("/api/send-qr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: g.email,
+          name: g.name,
+          token: g.token,
+          qrPng: qrDataUrl(g.token, 8, 4),         // embedded image (base64 PNG)
+          table: t ? t.name : null,
+          seat: t ? g.seat + 1 : null,
+        }),
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        // If the email service isn't set up yet, fall back to opening Mail.
+        if (res.status === 404 || res.status === 501) { notify("Email service not set up — opening Mail instead"); mailtoFallback(g); }
+        else notify("Send failed: " + msg);
+      } else {
+        notify(`Sent QR to ${g.name}`);
+      }
+    } catch (e) {
+      notify("Email service unreachable — opening Mail instead");
+      mailtoFallback(g);
+    }
+    setSending(null);
+  };
+
+  const emailAll = async () => {
+    const withEmail = guests.filter(g => g.email);
+    if (withEmail.length === 0) { notify("No guests have email addresses"); return; }
+    notify(`Sending ${withEmail.length} emails…`);
+    for (const g of withEmail) { await emailOne(g); }
+    notify("Done sending");
   };
 
   const buildPdf = async () => {
@@ -605,7 +654,10 @@ function QrCenter({ guests, tables, notify }) {
           <h2 style={{ margin: 0 }}>QR Codes</h2>
           <div style={S.muted}>Each guest's code encodes a unique token scanned at check-in.</div>
         </div>
-        <button style={S.primaryBtn} onClick={buildPdf}><Download size={16} /> PDF sheet (all)</button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button style={S.ghostBtn} onClick={emailAll}><Mail size={16} /> Email all</button>
+          <button style={S.primaryBtn} onClick={buildPdf}><Download size={16} /> PDF sheet (all)</button>
+        </div>
       </div>
       <div style={S.qrGrid}>
         {guests.map(g => (
@@ -615,7 +667,7 @@ function QrCenter({ guests, tables, notify }) {
             <div style={S.muted}>{tableName(g.tableId)}{g.tableId != null && g.seat != null ? ` · S${g.seat + 1}` : ""}</div>
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
               <button style={S.miniBtn} onClick={() => downloadOne(g)}><Download size={13} /> PNG</button>
-              <button style={S.miniBtn} onClick={() => emailOne(g)}><Mail size={13} /> Email</button>
+              <button style={S.miniBtn} disabled={sending === g.id} onClick={() => emailOne(g)}><Mail size={13} /> {sending === g.id ? "Sending…" : "Email"}</button>
             </div>
           </div>
         ))}
