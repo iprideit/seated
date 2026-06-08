@@ -1,0 +1,4 @@
+import SeatingApp from "./SeatingApp.jsx";
+export default function App() {
+  return <SeatingApp />;
+}
