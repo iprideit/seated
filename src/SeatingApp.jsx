@@ -920,7 +920,9 @@ function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFro
                   </select>
                 </td>}
                 {seated && <td style={S.td}>{t ? r.seat + 1 : "—"}</td>}
-                <td style={S.td}>{r.checked_in ? <span style={S.tagOk}><Check size={12} /> In</span> : <button style={S.tagBtn} onClick={() => updateAttendance(r.id, { checked_in: true })}>Check-In</button>}</td>
+                <td style={S.td}>{r.checked_in
+                  ? <button style={{ ...S.tagOk, background: "transparent", border: "1px solid var(--ok)", borderRadius: 8, padding: "4px 9px", cursor: "pointer" }} title="Click to undo check-in" onClick={() => { if (confirm(`Undo check-in for ${r.person.name}?`)) updateAttendance(r.id, { checked_in: false }); }}><Check size={12} /> In · undo</button>
+                  : <button style={S.tagBtn} onClick={() => updateAttendance(r.id, { checked_in: true })}>Check-In</button>}</td>
                 <td style={S.td}><button onClick={() => removeFromEvent(r.id)} style={S.iconBtn} title="Remove from event"><X size={15} /></button></td>
               </tr>
             );
@@ -1021,8 +1023,8 @@ function Scanner({ event, checkInByToken, roster, tables, addPerson, addToEvent,
     const res = await checkInByToken(token);
     if (res.status === "unknown") { notify("Unknown code"); return; }
     if (res.status === "no_event") { notify("Select an event first"); return; }
-    if (res.status === "already") { setLast({ name: res.person.name, note: "already checked in" }); return; }
-    setLast({ name: res.person.name, note: "checked in" });
+    if (res.status === "already") { setLast({ name: res.person.name, note: "already checked in", attId: res.att?.id }); return; }
+    setLast({ name: res.person.name, note: "checked in", attId: res.att?.id });
     if (res.needsSeat) setSeatPrompt({ person: res.person });
   };
   const loopNative = async () => { if (!videoRef.current) return; try { const c = await detRef.current.detect(videoRef.current); if (c[0]) handle(c[0].rawValue); } catch {} rafRef.current = requestAnimationFrame(loopNative); };
@@ -1037,7 +1039,18 @@ function Scanner({ event, checkInByToken, roster, tables, addPerson, addToEvent,
         {!active && <div style={S.scanIdle}><Camera size={48} color="var(--accent)" /><p>Point the camera at a guest's QR code</p><button style={S.primaryBtn} onClick={start}><Camera size={16} /> Start camera</button></div>}
         {active && <button style={S.stopBtn} onClick={stop}>Stop</button>}
       </div>
-      {last && <div style={{ ...S.scanResult, background: last.note === "checked in" ? "var(--ok)" : "var(--accent)" }}><Check size={20} /> {last.name}: {last.note}</div>}
+      {last && (
+        <div style={{ ...S.scanResult, background: last.note === "checked in" ? "var(--ok)" : "var(--accent)" }}>
+          <Check size={20} /> {last.name}: {last.note}
+          {last.attId && (
+            <button
+              onClick={async () => { await updateAttendance(last.attId, { checked_in: false }); notify(`Undid check-in for ${last.name}`); setLast(null); }}
+              style={{ marginLeft: 12, padding: "4px 12px", borderRadius: 8, border: "1px solid rgba(0,0,0,.3)", background: "rgba(0,0,0,.15)", color: "#0a0a0a", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
+              Undo
+            </button>
+          )}
+        </div>
+      )}
       <div style={S.manualBox}><input placeholder="Or type/paste a code token…" value={manual} onChange={e => setManual(e.target.value)} style={S.field} /><button style={S.ghostBtn} onClick={() => { handle(manual); setManual(""); }}>Check in</button></div>
       <button style={{ ...S.ghostBtn, marginTop: 4 }} onClick={() => setWalkup(true)}><UserPlus size={16} /> Add walk-up guest</button>
       {seatPrompt && (
