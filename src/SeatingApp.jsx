@@ -312,11 +312,15 @@ export default function App() {
 
     const norm = (s) => String(s || "").trim();
     const lower = (s) => norm(s).toLowerCase();
+    // Canonical form for matching table names: lowercase + collapse ALL runs of
+    // whitespace to a single space. So "Micheal C-1", "Micheal  C-1" (double
+    // space), and "micheal c-1 " all match the same existing table.
+    const canon = (s) => norm(s).toLowerCase().replace(/\s+/g, " ");
 
     const findOrCreateTable = (rawName) => {
       const name = norm(rawName);
       if (!name) return null;
-      let t = workTables.find(x => x.event_id === eventId && lower(x.name) === lower(name));
+      let t = workTables.find(x => x.event_id === eventId && canon(x.name) === canon(name));
       if (!t) {
         const evCount = workTables.filter(x => x.event_id === eventId).length;
         t = { id: uid(), event_id: eventId, name, shape: "round", seats: 10, x: 120 + (evCount % 4) * 220, y: 120 + Math.floor(evCount / 4) * 240, _ts: Date.now() };
