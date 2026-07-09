@@ -801,15 +801,28 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, rem
       </div>
       <div style={S.importHint}>Columns: <b>Name</b>, <b>Email</b>, <b>Table</b> (optional), <b>Seat</b> (optional). Imports into <b>{activeEvent ? activeEvent.name : "…select an event"}</b>. Missing tables are created automatically; existing people are matched by email and updated. Blank seat = first open seat.</div>
       <table style={S.table}>
-        <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{events.map(e => <th key={e.id} style={S.th}>{e.name}</th>)}<th style={S.th}></th></tr></thead>
+        <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{events.map(e => <th key={e.id} style={{ ...S.th, textAlign: "center" }}>{e.name}</th>)}<th style={S.th}></th></tr></thead>
         <tbody>
-          {people.map(p => (
+          {[...people].sort((a, b) => a.name.localeCompare(b.name)).map(p => (
             <tr key={p.id} style={S.tr}>
               <td style={S.td}>{p.name}</td>
               <td style={{ ...S.td, ...S.muted }}>{p.email || "—"}</td>
               {events.map(e => {
                 const a = attendance.find(x => x.person_id === p.id && x.event_id === e.id);
-                return (<td key={e.id} style={S.td}><input type="checkbox" checked={!!a} onChange={async () => { if (a) await removeFromEvent(a.id); else await addToEvent(p.id, e.id); }} />{a?.checked_in && <span style={{ color: "var(--ok)", marginLeft: 6, fontSize: 11 }}>in</span>}</td>);
+                const state = !a ? "out" : (a.checked_in ? "in" : "invited");
+                const title = state === "out" ? "Not invited, click to invite" : state === "in" ? "Checked in, click to remove from event" : "Invited, click to remove from event";
+                return (
+                  <td key={e.id} style={{ ...S.td, textAlign: "center" }}>
+                    <button title={title}
+                      onClick={async () => { if (a) await removeFromEvent(a.id); else await addToEvent(p.id, e.id); }}
+                      style={{ width: 26, height: 26, borderRadius: "50%", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center",
+                        border: state === "out" ? "1px solid var(--line)" : "none",
+                        background: state === "in" ? "var(--ok)" : state === "invited" ? "var(--accent)" : "transparent",
+                        color: state === "out" ? "var(--muted)" : "#0a0a0a" }}>
+                      {state !== "out" && <Check size={15} />}
+                    </button>
+                  </td>
+                );
               })}
               <td style={S.td}><button onClick={() => removePerson(p.id)} style={S.iconBtn}><Trash2 size={15} /></button></td>
             </tr>
@@ -908,7 +921,7 @@ function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFro
       <table style={{ ...S.table, marginTop: 6 }}>
         <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{seated && <th style={S.th}>Table</th>}{seated && <th style={S.th}>Seat</th>}<th style={S.th}>Status</th><th style={S.th}></th></tr></thead>
         <tbody>
-          {roster.map(r => {
+          {[...roster].sort((a, b) => a.person.name.localeCompare(b.person.name)).map(r => {
             const t = tables.find(x => x.id === r.table_id);
             return (
               <tr key={r.id} style={S.tr}>
@@ -940,7 +953,7 @@ function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFro
 function QrCenter({ roster, tables, event, notify }) {
   const [previews, setPreviews] = useState({});
   const [sending, setSending] = useState(null);
-  const invited = roster.map(r => ({ ...r.person, _att: r }));
+  const invited = roster.map(r => ({ ...r.person, _att: r })).sort((a, b) => a.name.localeCompare(b.name));
   useEffect(() => { const m = {}; invited.forEach(p => { m[p.id] = qrDataUrl(p.token, 4, 2); }); setPreviews(m); /* eslint-disable-next-line */ }, [roster.length]);
   const tableName = (id) => tables.find(t => t.id === id)?.name || null;
   const downloadOne = (p) => { const a = document.createElement("a"); a.href = qrDataUrl(p.token, 10, 4); a.download = `qr-${p.name.replace(/\s+/g, "_")}.png`; a.click(); };
