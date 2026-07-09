@@ -221,7 +221,11 @@ export default function App() {
   };
   const updateAttendance = async (id, patch) => {
     markEdit('att', id);
-    let next; setAttendance(p => p.map(a => a.id === id ? (next = { ...a, ...patch }) : a));
+    // Build the updated row deterministically from current state so the DB
+    // write always reflects the intended change (no reliance on updater timing).
+    const current = attendance.find(a => a.id === id);
+    const next = current ? { ...current, ...patch } : null;
+    setAttendance(p => p.map(a => a.id === id ? { ...a, ...patch } : a));
     if (sb && next) try { await sb.upsertAttendance(next); } catch (e) { notify(e.message); }
     return next;
   };
@@ -231,13 +235,29 @@ export default function App() {
     if (sb) try { await sb.delAttendance(id); } catch (e) { notify(e.message); }
   };
   const assignSeat = async (personId, tableId, seat) => {
-    let a = attFor(personId); if (!a) a = await addToEvent(personId);
-    if (!a) return;
+    // Find or create the attendance row for this person in the active event.
+    let a = attFor(personId);
+    if (!a) {
+      a = { id: uid(), event_id: activeEventId, person_id: personId, table_id: null, seat: null, checked_in: false };
+      markEdit('att', a.id);
+      setAttendance(p => [...p, a]);
+      if (sb) try { await sb.upsertAttendance(a); } catch (e) { notify(e.message); }
+    }
+    // Free any existing occupant of the target seat (in this event).
     if (tableId != null && seat != null) {
       const occ = attendance.find(x => x.event_id === activeEventId && x.table_id === tableId && x.seat === seat && x.person_id !== personId);
-      if (occ) await updateAttendance(occ.id, { table_id: null, seat: null });
+      if (occ) {
+        markEdit('att', occ.id);
+        const freed = { ...occ, table_id: null, seat: null };
+        setAttendance(p => p.map(x => x.id === occ.id ? freed : x));
+        if (sb) try { await sb.upsertAttendance(freed); } catch (e) { notify(e.message); }
+      }
     }
-    await updateAttendance(a.id, { table_id: tableId, seat });
+    // Write the assignment directly from the row we hold, not from stale state.
+    markEdit('att', a.id);
+    const updated = { ...a, table_id: tableId, seat };
+    setAttendance(p => p.map(x => x.id === a.id ? { ...x, table_id: tableId, seat } : x));
+    if (sb) try { await sb.upsertAttendance(updated); } catch (e) { notify(e.message); }
   };
 
   // ---- TABLE ops ----
