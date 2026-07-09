@@ -100,23 +100,46 @@ export default function App() {
   });
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
-  // Tracks the last time WE wrote to the DB. Auto-refresh pauses briefly after
-  // any local change so an in-flight refresh can't overwrite a fresh edit.
-  const lastMutation = useRef(0);
-  const markMutation = () => { lastMutation.current = Date.now(); };
+  // Per-row edit tracking: rows we changed in the last few seconds are protected
+  // from being overwritten by an incoming refresh. Keyed by `${table}:${id}`.
+  const recentEdits = useRef(new Map());
+  const markEdit = (kind, id) => { recentEdits.current.set(`${kind}:${id}`, Date.now()); };
+  const isProtected = (kind, id) => {
+    const t = recentEdits.current.get(`${kind}:${id}`);
+    return t && (Date.now() - t < 8000);
+  };
+  // Merge helper: keep our local version of any row edited very recently,
+  // otherwise take the server's version. Also keeps purely-local rows the
+  // server hasn't seen yet.
+  const mergeRows = (kind, local, server) => {
+    const serverById = new Map(server.map(r => [r.id, r]));
+    const out = [];
+    const seen = new Set();
+    for (const r of local) {
+      seen.add(r.id);
+      if (isProtected(kind, r.id)) out.push(r);            // protect recent edits
+      else if (serverById.has(r.id)) out.push(serverById.get(r.id));
+      // else: row was deleted on server and not protected -> drop it
+    }
+    for (const r of server) if (!seen.has(r.id)) out.push(r); // new rows from others
+    return out;
+  };
 
   const notify = (m) => { setToast(m); setTimeout(() => setToast(null), 2400); };
 
   const refresh = useCallback(async (client, { force = false } = {}) => {
     if (!client) return;
-    // Skip auto-refresh if we edited something in the last 6 seconds, unless forced.
-    if (!force && Date.now() - lastMutation.current < 6000) return;
     setLoading(true);
     try {
       const [ev, pe, tb, at] = await Promise.all([client.listEvents(), client.listPeople(), client.listTables(), client.listAttendance()]);
-      // One more guard: if a write landed while this fetch was in flight, drop the result.
-      if (!force && Date.now() - lastMutation.current < 6000) { setLoading(false); return; }
-      setEvents(ev); setPeople(pe); setTables(tb); setAttendance(at);
+      if (force) {
+        setEvents(ev); setPeople(pe); setTables(tb); setAttendance(at);
+      } else {
+        setEvents(prev => mergeRows("event", prev, ev));
+        setPeople(prev => mergeRows("person", prev, pe));
+        setTables(prev => mergeRows("table", prev, tb));
+        setAttendance(prev => mergeRows("att", prev, at));
+      }
       setActiveEventId(prev => prev || (ev[0]?.id ?? null));
     } catch (e) { notify("Sync failed: " + e.message); }
     setLoading(false);
@@ -150,14 +173,14 @@ export default function App() {
 
   // ---- EVENT ops ----
   const addEvent = async (name, kind) => {
-    markMutation();
     const e = { id: uid(), name, kind };
+    markEdit('event', e.id);
     setEvents(p => [...p, e]); setActiveEventId(e.id);
     if (sb) try { await sb.upsertEvent(e); } catch (err) { notify(err.message); }
     return e;
   };
   const removeEvent = async (id) => {
-    markMutation();
+    markEdit('event', id);
     setEvents(p => p.filter(e => e.id !== id));
     setTables(p => p.filter(t => t.event_id !== id));
     setAttendance(p => p.filter(a => a.event_id !== id));
@@ -167,19 +190,19 @@ export default function App() {
 
   // ---- PERSON ops ----
   const addPerson = async (data) => {
-    markMutation();
     const p = { id: uid(), token: uid() + uid(), name: data.name, email: data.email || "" };
+    markEdit('person', p.id);
     setPeople(prev => [...prev, p]);
     if (sb) try { await sb.upsertPerson(p); } catch (e) { notify(e.message); }
     return p;
   };
   const updatePerson = async (id, patch) => {
-    markMutation();
+    markEdit('person', id);
     let next; setPeople(prev => prev.map(p => p.id === id ? (next = { ...p, ...patch }) : p));
     if (sb && next) try { await sb.upsertPerson({ id: next.id, token: next.token, name: next.name, email: next.email }); } catch (e) { notify(e.message); }
   };
   const removePerson = async (id) => {
-    markMutation();
+    markEdit('person', id);
     setPeople(prev => prev.filter(p => p.id !== id));
     setAttendance(prev => prev.filter(a => a.person_id !== id));
     if (sb) try { await sb.delPerson(id); } catch (e) { notify(e.message); }
@@ -188,27 +211,26 @@ export default function App() {
   // ---- ATTENDANCE ----
   const attFor = (personId, eventId = activeEventId) => attendance.find(a => a.person_id === personId && a.event_id === eventId);
   const addToEvent = async (personId, eventId = activeEventId) => {
-    markMutation();
     if (!eventId) { notify("Create/select an event first"); return null; }
     const existing = attFor(personId, eventId); if (existing) return existing;
     const a = { id: uid(), event_id: eventId, person_id: personId, table_id: null, seat: null, checked_in: false };
+    markEdit('att', a.id);
     setAttendance(p => [...p, a]);
     if (sb) try { await sb.upsertAttendance(a); } catch (e) { notify(e.message); }
     return a;
   };
   const updateAttendance = async (id, patch) => {
-    markMutation();
+    markEdit('att', id);
     let next; setAttendance(p => p.map(a => a.id === id ? (next = { ...a, ...patch }) : a));
     if (sb && next) try { await sb.upsertAttendance(next); } catch (e) { notify(e.message); }
     return next;
   };
   const removeFromEvent = async (id) => {
-    markMutation();
+    markEdit('att', id);
     setAttendance(p => p.filter(a => a.id !== id));
     if (sb) try { await sb.delAttendance(id); } catch (e) { notify(e.message); }
   };
   const assignSeat = async (personId, tableId, seat) => {
-    markMutation();
     let a = attFor(personId); if (!a) a = await addToEvent(personId);
     if (!a) return;
     if (tableId != null && seat != null) {
@@ -220,20 +242,20 @@ export default function App() {
 
   // ---- TABLE ops ----
   const addTable = async (shape) => {
-    markMutation();
     if (!activeEventId) { notify("Create/select an event first"); return; }
     const evTables = tables.filter(t => t.event_id === activeEventId);
     const t = { id: uid(), event_id: activeEventId, name: `Table ${evTables.length + 1}`, shape, seats: shape === "round" ? 8 : 6, x: 120 + (evTables.length % 4) * 220, y: 120 + Math.floor(evTables.length / 4) * 240 };
+    markEdit('table', t.id);
     setTables(p => [...p, t]);
     if (sb) try { await sb.upsertTable(t); } catch (e) { notify(e.message); }
   };
   const updateTable = async (id, patch) => {
-    markMutation();
+    markEdit('table', id);
     let next; setTables(p => p.map(t => t.id === id ? (next = { ...t, ...patch }) : t));
     if (sb && next) try { await sb.upsertTable(next); } catch (e) { notify(e.message); }
   };
   const removeTable = async (id) => {
-    markMutation();
+    markEdit('table', id);
     setTables(p => p.filter(t => t.id !== id));
     setAttendance(p => p.map(a => a.table_id === id ? { ...a, table_id: null, seat: null } : a));
     if (sb) try { await sb.delTable(id); } catch (e) { notify(e.message); }
@@ -438,11 +460,21 @@ function TableNode({ t, roster, onDown, onSeat, onRemove, onRename, onSeats }) {
   const w = t.shape === "rectangle" ? 150 : 96, h = t.shape === "rectangle" ? 80 : 96;
   const pts = seatPositions(t.shape, t.seats, w, h);
   const occBy = (i) => roster.find(r => r.table_id === t.id && r.seat === i);
+  const [nameEdit, setNameEdit] = useState(t.name);
+  const [editing, setEditing] = useState(false);
+  // Keep local field in sync with server value when we're NOT actively editing.
+  useEffect(() => { if (!editing) setNameEdit(t.name); }, [t.name, editing]);
+  const commitName = () => { setEditing(false); if (nameEdit !== t.name) onRename(nameEdit); };
   return (
     <div style={{ position: "absolute", left: t.x, top: t.y, transform: "translate(-50%,-50%)" }}>
       <div style={{ position: "relative", width: w, height: h }}>
         <div onPointerDown={(e) => onDown(e, t)} style={{ width: w, height: h, cursor: "grab", borderRadius: t.shape === "round" ? "50%" : 14, background: "linear-gradient(145deg,var(--surface2),var(--surface))", border: "2px solid var(--line)", boxShadow: "0 8px 24px rgba(0,0,0,.35)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", userSelect: "none" }}>
-          <input value={t.name} onChange={e => onRename(e.target.value)} onPointerDown={e => e.stopPropagation()} style={S.tableName} />
+          <input value={nameEdit}
+            onFocus={() => setEditing(true)}
+            onChange={e => setNameEdit(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }}
+            onPointerDown={e => e.stopPropagation()} style={S.tableName} />
           <div style={S.seatCount}><button onPointerDown={e => e.stopPropagation()} onClick={() => onSeats(t.seats - 1)} style={S.tinyBtn}>−</button>{t.seats}<button onPointerDown={e => e.stopPropagation()} onClick={() => onSeats(t.seats + 1)} style={S.tinyBtn}>+</button></div>
         </div>
         <button onClick={onRemove} style={S.delTable}><Trash2 size={12} /></button>
