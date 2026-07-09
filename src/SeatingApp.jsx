@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import {
   Plus, Trash2, Users, Grid3x3, LayoutGrid, QrCode, Camera,
   Download, Mail, Check, X, Upload, Circle, Square, RectangleHorizontal,
-  Settings, Cloud, CloudOff, Search, RotateCcw, Calendar, ChevronDown, UserPlus
+  Settings, Cloud, CloudOff, Search, RotateCcw, Calendar, ChevronDown, UserPlus, Monitor, X as XIcon
 } from "lucide-react";
 import qrcode from "qrcode-generator";
 
@@ -296,6 +296,102 @@ export default function App() {
     if (sb) try { await sb.delTable(id); } catch (e) { notify(e.message); }
   };
 
+  // ---- IMPORT (Name, Email, Table, Seat) ----
+  // Auto-creates missing tables, matches existing people by email then name,
+  // and assigns seats. Blank Table = unseated; blank Seat = first open seat.
+  const importPeople = async (rows, eventId = activeEventId) => {
+    if (!eventId) { notify("Select an event first"); return; }
+    // Working copies we mutate as we go, then flush to state/DB once.
+    let workPeople = [...people];
+    let workTables = [...tables];
+    let workAtt = [...attendance];
+    const toUpsertPeople = [], toUpsertTables = [], toUpsertAtt = [];
+    let added = 0, updated = 0, seated = 0;
+
+    const norm = (s) => String(s || "").trim();
+    const lower = (s) => norm(s).toLowerCase();
+
+    const findOrCreateTable = (rawName) => {
+      const name = norm(rawName);
+      if (!name) return null;
+      let t = workTables.find(x => x.event_id === eventId && lower(x.name) === lower(name));
+      if (!t) {
+        const evCount = workTables.filter(x => x.event_id === eventId).length;
+        t = { id: uid(), event_id: eventId, name, shape: "round", seats: 10, x: 120 + (evCount % 4) * 220, y: 120 + Math.floor(evCount / 4) * 240, _ts: Date.now() };
+        workTables.push(t); toUpsertTables.push(t);
+      }
+      return t;
+    };
+    const firstOpenSeat = (tableId, takenExtra) => {
+      const taken = new Set(workAtt.filter(a => a.event_id === eventId && a.table_id === tableId).map(a => a.seat));
+      (takenExtra || []).forEach(s => taken.add(s));
+      const t = workTables.find(x => x.id === tableId);
+      const cap = t ? t.seats : 12;
+      for (let i = 0; i < cap; i++) if (!taken.has(i)) return i;
+      return null;
+    };
+
+    for (const r of rows) {
+      const name = norm(r.Name || r.name || r.NAME || Object.values(r)[0]);
+      if (!name) continue;
+      const email = norm(r.Email || r.email || r.EMAIL);
+      const tableRaw = norm(r.Table || r.table || r.TABLE);
+      const seatRaw = norm(r.Seat || r.seat || r.SEAT);
+
+      // match existing person by email (preferred) then name
+      let person = null;
+      if (email) person = workPeople.find(p => lower(p.email) === lower(email));
+      if (!person) person = workPeople.find(p => lower(p.name) === lower(name));
+      if (person) {
+        if ((email && person.email !== email) || person.name !== name) {
+          person = { ...person, name, email: email || person.email, _ts: Date.now() };
+          workPeople = workPeople.map(p => p.id === person.id ? person : p);
+          toUpsertPeople.push(person);
+        }
+        updated++;
+      } else {
+        person = { id: uid(), token: uid() + uid(), name, email, _ts: Date.now() };
+        workPeople.push(person); toUpsertPeople.push(person); added++;
+      }
+
+      // ensure attendance row for this event
+      let att = workAtt.find(a => a.person_id === person.id && a.event_id === eventId);
+      if (!att) { att = { id: uid(), event_id: eventId, person_id: person.id, table_id: null, seat: null, checked_in: false, _ts: Date.now() }; workAtt.push(att); }
+
+      // resolve table + seat
+      let table_id = null, seat = null;
+      if (tableRaw) {
+        const t = findOrCreateTable(tableRaw);
+        table_id = t.id;
+        if (seatRaw && !isNaN(parseInt(seatRaw, 10))) {
+          seat = Math.max(0, parseInt(seatRaw, 10) - 1); // 1-based in sheet -> 0-based
+        } else {
+          seat = firstOpenSeat(table_id, [att.table_id === table_id ? att.seat : null].filter(x => x != null));
+        }
+        seated++;
+      }
+      const newAtt = { ...att, table_id, seat, _ts: Date.now() };
+      workAtt = workAtt.map(a => a.id === att.id ? newAtt : a);
+      toUpsertAtt.push(newAtt);
+    }
+
+    // Flush to local state
+    setPeople(workPeople); setTables(workTables); setAttendance(workAtt);
+    workPeople.forEach(p => markEdit('person', p.id));
+    workTables.forEach(t => markEdit('table', t.id));
+    workAtt.forEach(a => markEdit('att', a.id));
+
+    // Flush to DB
+    if (sb) {
+      try {
+        for (const t of toUpsertTables) await sb.upsertTable(t);
+        for (const p of toUpsertPeople) await sb.upsertPerson(p);
+        for (const a of toUpsertAtt) await sb.upsertAttendance(a);
+      } catch (e) { notify("Import save error: " + e.message); }
+    }
+    notify(`Imported: ${added} new, ${updated} updated, ${seated} seated`);
+  };
+
   // ---- DOOR check-in ----
   const checkInByToken = async (token) => {
     if (!activeEventId) return { status: "no_event" };
@@ -314,6 +410,11 @@ export default function App() {
   const roster = evAttendance.map(a => ({ ...a, person: people.find(p => p.id === a.person_id) })).filter(r => r.person);
   const stats = { total: roster.length, seated: roster.filter(r => r.table_id != null).length, checkedIn: roster.filter(r => r.checked_in).length };
 
+  // Full-screen TV display board — no header, takes over the screen.
+  if (view === "display" && activeEvent) {
+    return <DisplayBoard event={activeEvent} tables={evTables} roster={roster} onExit={() => setView("grid")} />;
+  }
+
   return (
     <div style={S.root}>
       <style>{CSSVARS}</style>
@@ -326,10 +427,10 @@ export default function App() {
         )}
         {activeEvent && view === "grid" && activeEvent.kind === "seated" && <TableGrid tables={evTables} roster={roster} />}
         {view === "people" && (
-          <PeopleManager people={people} events={events} attendance={attendance} activeEvent={activeEvent} addPerson={addPerson} removePerson={removePerson} addToEvent={addToEvent} removeFromEvent={removeFromEvent} notify={notify} />
+          <PeopleManager people={people} events={events} attendance={attendance} activeEvent={activeEvent} addPerson={addPerson} removePerson={removePerson} addToEvent={addToEvent} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
         )}
         {activeEvent && view === "roster" && (
-          <Roster event={activeEvent} roster={roster} tables={evTables} assignSeat={assignSeat} updateAttendance={updateAttendance} removeFromEvent={removeFromEvent} />
+          <Roster event={activeEvent} roster={roster} tables={evTables} assignSeat={assignSeat} updateAttendance={updateAttendance} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
         )}
         {activeEvent && view === "qr" && <QrCenter roster={roster} tables={evTables} event={activeEvent} notify={notify} />}
         {activeEvent && view === "scan" && (
@@ -352,6 +453,7 @@ function Header({ view, setView, sb, loading, stats, events, activeEvent, setAct
   const items = [
     seated && ["floor", "Floor Plan", LayoutGrid],
     seated && ["grid", "Table Grid", Grid3x3],
+    seated && ["display", "TV Display", Monitor],
     ["people", "People", Users],
     activeEvent && ["roster", "Roster", Grid3x3],
     activeEvent && ["qr", "QR Codes", QrCode],
@@ -576,22 +678,77 @@ function TableGrid({ tables, roster }) {
 }
 
 // ============================================================
+//  DisplayBoard — full-screen TV seating board for the entrance
+// ============================================================
+function DisplayBoard({ event, tables, roster, onExit }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const iv = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(iv); }, []);
+  const totalIn = roster.filter(r => r.checked_in).length;
+  const totalSeated = roster.filter(r => r.table_id != null).length;
+  // Sort tables by their name in a natural order (Table 2 before Table 10).
+  const sorted = [...tables].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return (
+    <div style={D.wrap}>
+      <style>{DISPLAY_CSS}</style>
+      {/* decorative background layers */}
+      <div style={D.glowA} /><div style={D.glowB} /><div style={D.grain} />
+      <button style={D.exit} onClick={onExit} title="Exit display"><XIcon size={20} /></button>
+
+      <header style={D.header}>
+        <img src="/logo.png" alt="" style={D.logo}
+          onError={(e) => { e.currentTarget.style.display = "none"; }} />
+        <div style={D.titleWrap}>
+          <div style={D.kicker}>NAGAAA · EST. 1997</div>
+          <h1 style={D.title}>Hall of Fame Dinner <span style={D.amp}>&amp;</span> iPride Awards</h1>
+          <div style={D.subtitle}>Please find your table below · {totalSeated} guests seated · {totalIn} checked in</div>
+        </div>
+      </header>
+
+      <div style={D.grid}>
+        {sorted.map(t => {
+          const occ = roster.filter(r => r.table_id === t.id).sort((a, b) => a.seat - b.seat);
+          return (
+            <div key={t.id} style={D.card}>
+              <div style={D.cardHead}>
+                <span style={D.tableName}>{t.name}</span>
+                <span style={D.tableCount}>{occ.length}/{t.seats}</span>
+              </div>
+              <div style={D.names}>
+                {occ.length === 0 && <div style={D.emptyTable}>—</div>}
+                {occ.map(r => (
+                  <div key={r.id} style={{ ...D.nameRow, ...(r.checked_in ? D.nameIn : {}) }}>
+                    <span style={D.seatDot}>{r.seat + 1}</span>
+                    <span style={D.personName}>{r.person.name}</span>
+                    {r.checked_in && <Check size={16} style={{ color: "#0c0f0c", flexShrink: 0 }} />}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {sorted.length === 0 && <div style={{ ...D.emptyTable, gridColumn: "1/-1", fontSize: 28 }}>No tables yet</div>}
+      </div>
+
+      <footer style={D.footer}>
+        <span style={D.legendItem}><span style={{ ...D.legendSwatch, background: "var(--gold)" }} /> Seated</span>
+        <span style={D.legendItem}><span style={{ ...D.legendSwatch, background: "var(--okD)" }} /> Checked in</span>
+      </footer>
+    </div>
+  );
+}
+
+// ============================================================
 //  People manager
 // ============================================================
-function PeopleManager({ people, events, attendance, activeEvent, addPerson, removePerson, addToEvent, removeFromEvent, notify }) {
+function PeopleManager({ people, events, attendance, activeEvent, addPerson, removePerson, addToEvent, removeFromEvent, importPeople, notify }) {
   const [name, setName] = useState(""); const [email, setEmail] = useState("");
   const fileRef = useRef(null);
   const importFile = async (file) => {
+    if (!activeEvent) { notify("Select an event first"); return; }
     const XLSX = await import("xlsx");
     const wb = XLSX.read(await file.arrayBuffer());
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
-    let n = 0;
-    for (const r of rows) {
-      const nm = r.Name || r.name || r.NAME || Object.values(r)[0];
-      const em = r.Email || r.email || r.EMAIL || "";
-      if (nm) { const p = await addPerson({ name: String(nm).trim(), email: String(em).trim() }); if (activeEvent) await addToEvent(p.id, activeEvent.id); n++; }
-    }
-    notify(`Imported ${n} people${activeEvent ? ` into ${activeEvent.name}` : ""}`);
+    await importPeople(rows, activeEvent.id);
   };
   return (
     <div style={{ padding: 24, height: "100%", overflowY: "auto" }}>
@@ -602,7 +759,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, rem
         <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={e => e.target.files[0] && importFile(e.target.files[0])} />
         <button style={S.ghostBtn} onClick={() => fileRef.current.click()}><Upload size={16} /> Import Excel/CSV</button>
       </div>
-      <div style={S.importHint}>New people join the master list{activeEvent ? <> and are invited to <b>{activeEvent.name}</b></> : <> (select an event to also invite them)</>}. Check the box under an event to invite/uninvite. Columns: <b>Name</b>, <b>Email</b>.</div>
+      <div style={S.importHint}>Columns: <b>Name</b>, <b>Email</b>, <b>Table</b> (optional), <b>Seat</b> (optional). Imports into <b>{activeEvent ? activeEvent.name : "…select an event"}</b>. Missing tables are created automatically; existing people are matched by email and updated. Blank seat = first open seat.</div>
       <table style={S.table}>
         <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{events.map(e => <th key={e.id} style={S.th}>{e.name}</th>)}<th style={S.th}></th></tr></thead>
         <tbody>
@@ -627,12 +784,37 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, rem
 // ============================================================
 //  Roster
 // ============================================================
-function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFromEvent }) {
+function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFromEvent, importPeople, notify }) {
   const seated = event.kind === "seated";
+  const fileRef = useRef(null);
+  const importFile = async (file) => {
+    const XLSX = await import("xlsx");
+    const wb = XLSX.read(await file.arrayBuffer());
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
+    await importPeople(rows, event.id);
+  };
+  const exportRoster = async () => {
+    const XLSX = await import("xlsx");
+    const data = roster.map(r => {
+      const t = tables.find(x => x.id === r.table_id);
+      return { Name: r.person.name, Email: r.person.email || "", Table: t ? t.name : "", Seat: t ? r.seat + 1 : "", CheckedIn: r.checked_in ? "yes" : "" };
+    });
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Roster");
+    XLSX.writeFile(wb, `${event.name}-roster.xlsx`);
+  };
   return (
     <div style={{ padding: 24, height: "100%", overflowY: "auto" }}>
-      <h2 style={{ fontFamily: DISPLAY, marginTop: 0 }}>{event.name} <span style={S.eventKind}>{event.kind}</span></h2>
-      <table style={S.table}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+        <h2 style={{ fontFamily: DISPLAY, marginTop: 0, marginBottom: 0 }}>{event.name} <span style={S.eventKind}>{event.kind}</span></h2>
+        <div style={{ display: "flex", gap: 10 }}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={e => e.target.files[0] && importFile(e.target.files[0])} />
+          <button style={S.ghostBtn} onClick={() => fileRef.current.click()}><Upload size={16} /> Import seating</button>
+          <button style={S.ghostBtn} onClick={exportRoster}><Download size={16} /> Export</button>
+        </div>
+      </div>
+      {seated && <div style={{ ...S.importHint, marginTop: 10 }}>Import columns: <b>Name</b>, <b>Email</b>, <b>Table</b>, <b>Seat</b>. Missing tables are created; people matched by email are updated (great for reshuffles). Blank seat = first open seat.</div>}
+      <table style={{ ...S.table, marginTop: 6 }}>
         <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{seated && <th style={S.th}>Table</th>}{seated && <th style={S.th}>Seat</th>}<th style={S.th}>Status</th><th style={S.th}></th></tr></thead>
         <tbody>
           {roster.map(r => {
@@ -881,6 +1063,44 @@ input:focus,select:focus{outline:1px solid var(--accent)}
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Outfit:wght@300;400;500;600&display=swap');
 `;
 const FONT = "'Outfit',system-ui,sans-serif"; const DISPLAY = "'Fraunces',Georgia,serif";
+const DISPLAY_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Outfit:wght@300;400;500;600&display=swap');
+@keyframes floatA { 0%,100%{ transform:translate(-10%,-10%) scale(1);} 50%{ transform:translate(-6%,-4%) scale(1.15);} }
+@keyframes floatB { 0%,100%{ transform:translate(10%,10%) scale(1.1);} 50%{ transform:translate(4%,6%) scale(1);} }
+@keyframes fadeUp { from{ opacity:0; transform:translateY(14px);} to{ opacity:1; transform:none;} }
+`;
+const D = (() => {
+  const gold = "#d4af6a", gold2 = "#e9c889", okD = "#8fe0ab";
+  return {
+    wrap: { position: "fixed", inset: 0, background: "radial-gradient(ellipse at 50% 0%, #171b22, #0b0d10 70%)", color: "#e8edf2", fontFamily: "'Outfit',system-ui,sans-serif", overflow: "auto", padding: "3vmin 3.5vmin", "--gold": gold, "--okD": okD },
+    glowA: { position: "fixed", top: 0, left: 0, width: "60vw", height: "60vw", background: "radial-gradient(circle, rgba(212,175,106,.10), transparent 60%)", animation: "floatA 18s ease-in-out infinite", pointerEvents: "none" },
+    glowB: { position: "fixed", bottom: 0, right: 0, width: "55vw", height: "55vw", background: "radial-gradient(circle, rgba(143,224,171,.07), transparent 60%)", animation: "floatB 22s ease-in-out infinite", pointerEvents: "none" },
+    grain: { position: "fixed", inset: 0, opacity: .04, pointerEvents: "none", backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")" },
+    exit: { position: "fixed", top: 16, right: 16, zIndex: 10, width: 42, height: 42, borderRadius: "50%", border: "1px solid rgba(255,255,255,.15)", background: "rgba(0,0,0,.35)", color: "#e8edf2", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(6px)" },
+    header: { position: "relative", display: "flex", alignItems: "center", justifyContent: "center", gap: "3vmin", padding: "1vmin 0 2.4vmin", textAlign: "center", animation: "fadeUp .8s ease both" },
+    logo: { height: "13vmin", maxHeight: 150, width: "auto", filter: "drop-shadow(0 6px 24px rgba(0,0,0,.5))" },
+    titleWrap: { display: "flex", flexDirection: "column", alignItems: "center", gap: "0.6vmin" },
+    kicker: { fontSize: "1.5vmin", letterSpacing: "0.5em", color: gold, fontWeight: 500, textIndent: "0.5em" },
+    title: { margin: 0, fontFamily: "'Fraunces',Georgia,serif", fontWeight: 600, fontSize: "5.4vmin", lineHeight: 1.05, background: `linear-gradient(180deg,#fff, ${gold2})`, WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" },
+    amp: { fontStyle: "italic", color: gold, WebkitTextFillColor: gold },
+    subtitle: { fontSize: "1.9vmin", color: "#aeb8c4", marginTop: "0.4vmin" },
+    grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 30vw), 1fr))", gap: "2vmin", alignContent: "start", position: "relative" },
+    card: { background: "linear-gradient(160deg, rgba(31,37,45,.92), rgba(19,23,28,.92))", border: "1px solid rgba(212,175,106,.28)", borderRadius: 18, padding: "1.8vmin 2vmin", boxShadow: "0 14px 40px rgba(0,0,0,.4)", animation: "fadeUp .7s ease both" },
+    cardHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1.2vmin", paddingBottom: "1vmin", borderBottom: "1px solid rgba(212,175,106,.25)" },
+    tableName: { fontFamily: "'Fraunces',Georgia,serif", fontSize: "2.9vmin", fontWeight: 600, color: gold2 },
+    tableCount: { fontSize: "1.6vmin", color: "#8b97a5", fontWeight: 500 },
+    names: { display: "flex", flexDirection: "column", gap: "0.7vmin" },
+    nameRow: { display: "flex", alignItems: "center", gap: "1.2vmin", padding: "0.7vmin 1vmin", borderRadius: 10, background: "rgba(255,255,255,.03)", fontSize: "1.95vmin" },
+    nameIn: { background: okD, color: "#0c0f0c", fontWeight: 600 },
+    seatDot: { flexShrink: 0, width: "3vmin", height: "3vmin", minWidth: 26, minHeight: 26, borderRadius: "50%", border: "1px solid rgba(212,175,106,.5)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.5vmin", fontWeight: 700 },
+    personName: { flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+    emptyTable: { color: "#5d6873", textAlign: "center", padding: "1vmin", fontSize: "2vmin" },
+    footer: { display: "flex", justifyContent: "center", gap: "4vmin", marginTop: "2.4vmin", padding: "1.4vmin", color: "#aeb8c4", fontSize: "1.7vmin" },
+    legendItem: { display: "flex", alignItems: "center", gap: "1vmin" },
+    legendSwatch: { width: "1.8vmin", height: "1.8vmin", minWidth: 14, minHeight: 14, borderRadius: 5, display: "inline-block" },
+  };
+})();
+
 const S = {
   root: { height: "100vh", display: "flex", flexDirection: "column", background: "var(--bg)", color: "var(--text)", fontFamily: FONT, fontSize: 14 },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 18px", borderBottom: "1px solid var(--line)", background: "var(--surface)", gap: 12, flexWrap: "wrap" },
