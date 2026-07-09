@@ -296,17 +296,19 @@ export default function App() {
     if (sb) try { await sb.delTable(id); } catch (e) { notify(e.message); }
   };
 
-  // ---- IMPORT (Name, Email, Table, Seat) ----
-  // Auto-creates missing tables, matches existing people by email then name,
-  // and assigns seats. Blank Table = unseated; blank Seat = first open seat.
+  // ---- IMPORT (Name, Email, Table, Seat) with conflict detection ----
+  // Imports everyone; SKIPS a seat assignment when it conflicts, leaving the
+  // existing occupant in place. Returns a list of conflicts for the UI to show
+  // and download. Conflict types: seat_taken, duplicate_in_file, seat_out_of_range.
   const importPeople = async (rows, eventId = activeEventId) => {
-    if (!eventId) { notify("Select an event first"); return; }
-    // Working copies we mutate as we go, then flush to state/DB once.
+    if (!eventId) { notify("Select an event first"); return { conflicts: [] }; }
     let workPeople = [...people];
     let workTables = [...tables];
     let workAtt = [...attendance];
     const toUpsertPeople = [], toUpsertTables = [], toUpsertAtt = [];
     let added = 0, updated = 0, seated = 0;
+    const conflicts = [];
+    const seenInFile = new Map(); // key: email|name -> row number
 
     const norm = (s) => String(s || "").trim();
     const lower = (s) => norm(s).toLowerCase();
@@ -322,23 +324,36 @@ export default function App() {
       }
       return t;
     };
-    const firstOpenSeat = (tableId, takenExtra) => {
+    // Who currently holds a given seat (excluding one person id)?
+    const occupantOf = (tableId, seat, exceptPersonId) =>
+      workAtt.find(a => a.event_id === eventId && a.table_id === tableId && a.seat === seat && a.person_id !== exceptPersonId);
+    const firstOpenSeat = (tableId) => {
       const taken = new Set(workAtt.filter(a => a.event_id === eventId && a.table_id === tableId).map(a => a.seat));
-      (takenExtra || []).forEach(s => taken.add(s));
       const t = workTables.find(x => x.id === tableId);
       const cap = t ? t.seats : 12;
       for (let i = 0; i < cap; i++) if (!taken.has(i)) return i;
       return null;
     };
+    const nameOfPerson = (pid) => (workPeople.find(p => p.id === pid) || {}).name || "someone";
 
+    let rowNum = 1;
     for (const r of rows) {
+      rowNum++;
       const name = norm(r.Name || r.name || r.NAME || Object.values(r)[0]);
       if (!name) continue;
       const email = norm(r.Email || r.email || r.EMAIL);
       const tableRaw = norm(r.Table || r.table || r.TABLE);
       const seatRaw = norm(r.Seat || r.seat || r.SEAT);
 
-      // match existing person by email (preferred) then name
+      // duplicate-in-file check
+      const dupKey = email ? `e:${lower(email)}` : `n:${lower(name)}`;
+      if (seenInFile.has(dupKey)) {
+        conflicts.push({ row: rowNum, name, table: tableRaw, seat: seatRaw, type: "Duplicate in file", detail: `Also on row ${seenInFile.get(dupKey)}, this row's seating skipped` });
+        continue;
+      }
+      seenInFile.set(dupKey, rowNum);
+
+      // match existing person by email then name
       let person = null;
       if (email) person = workPeople.find(p => lower(p.email) === lower(email));
       if (!person) person = workPeople.find(p => lower(p.name) === lower(name));
@@ -354,34 +369,53 @@ export default function App() {
         workPeople.push(person); toUpsertPeople.push(person); added++;
       }
 
-      // ensure attendance row for this event
+      // ensure attendance row
       let att = workAtt.find(a => a.person_id === person.id && a.event_id === eventId);
       if (!att) { att = { id: uid(), event_id: eventId, person_id: person.id, table_id: null, seat: null, checked_in: false, _ts: Date.now() }; workAtt.push(att); }
 
-      // resolve table + seat
-      let table_id = null, seat = null;
+      // resolve seating
+      let table_id = null, seat = null, doSeat = true;
       if (tableRaw) {
         const t = findOrCreateTable(tableRaw);
         table_id = t.id;
-        if (seatRaw && !isNaN(parseInt(seatRaw, 10))) {
-          seat = Math.max(0, parseInt(seatRaw, 10) - 1); // 1-based in sheet -> 0-based
+        if (seatRaw) {
+          const parsed = parseInt(seatRaw, 10);
+          if (isNaN(parsed)) { seat = firstOpenSeat(table_id); }
+          else if (parsed < 1 || parsed > t.seats) {
+            conflicts.push({ row: rowNum, name, table: t.name, seat: seatRaw, type: "Seat out of range", detail: `${t.name} has ${t.seats} seats, left unseated` });
+            doSeat = false;
+          } else {
+            seat = parsed - 1; // 1-based -> 0-based
+            const occ = occupantOf(table_id, seat, person.id);
+            if (occ) {
+              conflicts.push({ row: rowNum, name, table: t.name, seat: seatRaw, type: "Seat already taken", detail: `Seat ${parsed} at ${t.name} held by ${nameOfPerson(occ.person_id)}, skipped` });
+              doSeat = false;
+            }
+          }
         } else {
-          seat = firstOpenSeat(table_id, [att.table_id === table_id ? att.seat : null].filter(x => x != null));
+          seat = firstOpenSeat(table_id);
+          if (seat == null) { conflicts.push({ row: rowNum, name, table: t.name, seat: "", type: "Table full", detail: `${t.name} has no open seats, left unseated` }); doSeat = false; }
         }
-        seated++;
       }
-      const newAtt = { ...att, table_id, seat, _ts: Date.now() };
+
+      // apply: if seating was skipped due to conflict, keep person's existing seat as-is
+      let newAtt;
+      if (!tableRaw) {
+        newAtt = { ...att, _ts: Date.now() }; // no seating info in row; leave seat untouched
+      } else if (doSeat) {
+        newAtt = { ...att, table_id, seat, _ts: Date.now() }; seated++;
+      } else {
+        newAtt = { ...att, _ts: Date.now() }; // conflict: leave existing assignment untouched
+      }
       workAtt = workAtt.map(a => a.id === att.id ? newAtt : a);
       toUpsertAtt.push(newAtt);
     }
 
-    // Flush to local state
     setPeople(workPeople); setTables(workTables); setAttendance(workAtt);
     workPeople.forEach(p => markEdit('person', p.id));
     workTables.forEach(t => markEdit('table', t.id));
     workAtt.forEach(a => markEdit('att', a.id));
 
-    // Flush to DB
     if (sb) {
       try {
         for (const t of toUpsertTables) await sb.upsertTable(t);
@@ -389,7 +423,8 @@ export default function App() {
         for (const a of toUpsertAtt) await sb.upsertAttendance(a);
       } catch (e) { notify("Import save error: " + e.message); }
     }
-    notify(`Imported: ${added} new, ${updated} updated, ${seated} seated`);
+    notify(`Imported: ${added} new, ${updated} updated, ${seated} seated${conflicts.length ? `, ${conflicts.length} conflict(s)` : ""}`);
+    return { conflicts, added, updated, seated };
   };
 
   // ---- DOOR check-in ----
@@ -541,7 +576,7 @@ function EventsManager({ events, addEvent, removeEvent, activeEventId, setActive
             </div>
           );
         })}
-        {events.length === 0 && <div style={S.muted}>No events yet — add one above.</div>}
+        {events.length === 0 && <div style={S.muted}>No events yet, add one above.</div>}
       </div>
     </div>
   );
@@ -684,7 +719,7 @@ function DisplayBoard({ event, tables, roster, onExit }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const iv = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(iv); }, []);
   const totalIn = roster.filter(r => r.checked_in).length;
-  const totalSeated = roster.filter(r => r.table_id != null).length;
+  const yetToArrive = roster.filter(r => !r.checked_in).length;
   // Sort tables by their name in a natural order (Table 2 before Table 10).
   const sorted = [...tables].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   return (
@@ -695,13 +730,14 @@ function DisplayBoard({ event, tables, roster, onExit }) {
       <button style={D.exit} onClick={onExit} title="Exit display"><XIcon size={20} /></button>
 
       <header style={D.header}>
-        <img src="/logo.png" alt="" style={D.logo}
-          onError={(e) => { e.currentTarget.style.display = "none"; }} />
+        <img src="/logo.png" alt="" style={D.logo} onError={(e) => { e.currentTarget.style.display = "none"; }} />
         <div style={D.titleWrap}>
           <div style={D.kicker}>NAGAAA · EST. 1997</div>
           <h1 style={D.title}>Hall of Fame Dinner <span style={D.amp}>&amp;</span> iPride Awards</h1>
-          <div style={D.subtitle}>Please find your table below · {totalSeated} guests seated · {totalIn} checked in</div>
+          <div style={D.subtitle}>Welcome! Please have your QR code ready to present at check-in</div>
+          <div style={D.counts}>{yetToArrive} yet to arrive · {totalIn} checked in</div>
         </div>
+        <img src="/logo2.png" alt="" style={D.logo} onError={(e) => { e.currentTarget.style.display = "none"; }} />
       </header>
 
       <div style={D.grid}>
@@ -774,7 +810,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, rem
               <td style={S.td}><button onClick={() => removePerson(p.id)} style={S.iconBtn}><Trash2 size={15} /></button></td>
             </tr>
           ))}
-          {people.length === 0 && <tr><td colSpan={3 + events.length} style={{ ...S.td, ...S.muted, textAlign: "center", padding: 40 }}>No people yet — add or import.</td></tr>}
+          {people.length === 0 && <tr><td colSpan={3 + events.length} style={{ ...S.td, ...S.muted, textAlign: "center", padding: 40 }}>No people yet, add or import.</td></tr>}
         </tbody>
       </table>
     </div>
@@ -787,33 +823,84 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, rem
 function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFromEvent, importPeople, notify }) {
   const seated = event.kind === "seated";
   const fileRef = useRef(null);
+  const [conflicts, setConflicts] = useState([]);
   const importFile = async (file) => {
     const XLSX = await import("xlsx");
     const wb = XLSX.read(await file.arrayBuffer());
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
-    await importPeople(rows, event.id);
+    const res = await importPeople(rows, event.id);
+    setConflicts(res?.conflicts || []);
+    if (fileRef.current) fileRef.current.value = "";
   };
-  const exportRoster = async () => {
+  const downloadConflicts = async () => {
     const XLSX = await import("xlsx");
-    const data = roster.map(r => {
+    const ws = XLSX.utils.json_to_sheet(conflicts.map(c => ({ Row: c.row, Name: c.name, Table: c.table, Seat: c.seat, Conflict: c.type, Detail: c.detail })));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Conflicts");
+    XLSX.writeFile(wb, `${event.name}-import-conflicts.xlsx`);
+  };
+  // Volunteer export 1: alphabetical check-in sheet
+  const exportAlpha = async () => {
+    const XLSX = await import("xlsx");
+    const rows = [...roster].sort((a, b) => a.person.name.localeCompare(b.person.name)).map(r => {
       const t = tables.find(x => x.id === r.table_id);
-      return { Name: r.person.name, Email: r.person.email || "", Table: t ? t.name : "", Seat: t ? r.seat + 1 : "", CheckedIn: r.checked_in ? "yes" : "" };
+      return { Name: r.person.name, Table: t ? t.name : "", Seat: t ? r.seat + 1 : "", "Checked In": r.checked_in ? "yes" : "" };
     });
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Roster");
-    XLSX.writeFile(wb, `${event.name}-roster.xlsx`);
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 8 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Check-in (A-Z)");
+    XLSX.writeFile(wb, `${event.name}-checkin-alphabetical.xlsx`);
+  };
+  // Volunteer export 2: grouped by table
+  const exportByTable = async () => {
+    const XLSX = await import("xlsx");
+    const rows = [];
+    const sortedTables = [...tables].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    for (const t of sortedTables) {
+      const occ = roster.filter(r => r.table_id === t.id).sort((a, b) => a.seat - b.seat);
+      rows.push({ Table: t.name, Seat: "", Name: "", "Checked In": "" });
+      for (const r of occ) rows.push({ Table: "", Seat: r.seat + 1, Name: r.person.name, "Checked In": r.checked_in ? "yes" : "" });
+      rows.push({ Table: "", Seat: "", Name: "", "Checked In": "" });
+    }
+    const unseated = roster.filter(r => r.table_id == null);
+    if (unseated.length) {
+      rows.push({ Table: "UNSEATED", Seat: "", Name: "", "Checked In": "" });
+      for (const r of unseated.sort((a, b) => a.person.name.localeCompare(b.person.name))) rows.push({ Table: "", Seat: "", Name: r.person.name, "Checked In": r.checked_in ? "yes" : "" });
+    }
+    const ws = XLSX.utils.json_to_sheet(rows, { header: ["Table", "Seat", "Name", "Checked In"] });
+    ws["!cols"] = [{ wch: 18 }, { wch: 8 }, { wch: 28 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "By table");
+    XLSX.writeFile(wb, `${event.name}-checkin-by-table.xlsx`);
   };
   return (
     <div style={{ padding: 24, height: "100%", overflowY: "auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
         <h2 style={{ fontFamily: DISPLAY, marginTop: 0, marginBottom: 0 }}>{event.name} <span style={S.eventKind}>{event.kind}</span></h2>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={e => e.target.files[0] && importFile(e.target.files[0])} />
           <button style={S.ghostBtn} onClick={() => fileRef.current.click()}><Upload size={16} /> Import seating</button>
-          <button style={S.ghostBtn} onClick={exportRoster}><Download size={16} /> Export</button>
+          <button style={S.ghostBtn} onClick={exportAlpha}><Download size={16} /> Check-in (A–Z)</button>
+          <button style={S.ghostBtn} onClick={exportByTable}><Download size={16} /> By table</button>
         </div>
       </div>
-      {seated && <div style={{ ...S.importHint, marginTop: 10 }}>Import columns: <b>Name</b>, <b>Email</b>, <b>Table</b>, <b>Seat</b>. Missing tables are created; people matched by email are updated (great for reshuffles). Blank seat = first open seat.</div>}
+      {seated && <div style={{ ...S.importHint, marginTop: 10 }}>Import columns: <b>Name</b>, <b>Email</b>, <b>Table</b>, <b>Seat</b>. Table names must match EXACTLY or a new table is created. Conflicting seats are skipped and listed below.</div>}
+      {conflicts.length > 0 && (
+        <div style={{ margin: "12px 0", padding: 16, borderRadius: 12, background: "#2a1f14", border: "1px solid var(--accent)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <b style={{ color: "var(--accent2)" }}>{conflicts.length} import conflict(s), these seats were NOT changed</b>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={S.ghostBtn} onClick={downloadConflicts}><Download size={14} /> Download</button>
+              <button style={S.iconBtn} onClick={() => setConflicts([])}><X size={16} /></button>
+            </div>
+          </div>
+          <div style={{ maxHeight: 200, overflowY: "auto" }}>
+            {conflicts.map((c, i) => (
+              <div key={i} style={{ fontSize: 13, padding: "5px 0", borderBottom: "1px solid rgba(255,255,255,.06)" }}>
+                <b>Row {c.row}:</b> {c.name}, <span style={{ color: "var(--accent2)" }}>{c.type}</span>. {c.detail}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <table style={{ ...S.table, marginTop: 6 }}>
         <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{seated && <th style={S.th}>Table</th>}{seated && <th style={S.th}>Seat</th>}<th style={S.th}>Status</th><th style={S.th}></th></tr></thead>
         <tbody>
@@ -851,15 +938,15 @@ function QrCenter({ roster, tables, event, notify }) {
   useEffect(() => { const m = {}; invited.forEach(p => { m[p.id] = qrDataUrl(p.token, 4, 2); }); setPreviews(m); /* eslint-disable-next-line */ }, [roster.length]);
   const tableName = (id) => tables.find(t => t.id === id)?.name || null;
   const downloadOne = (p) => { const a = document.createElement("a"); a.href = qrDataUrl(p.token, 10, 4); a.download = `qr-${p.name.replace(/\s+/g, "_")}.png`; a.click(); };
-  const mailtoFallback = (p) => { const body = `Hi ${p.name},\n\nYou're confirmed for ${event.name}.\nPlease present your QR code at check-in. Code ID: ${p.token}\n\nSee you there!`; window.location.href = `mailto:${encodeURIComponent(p.email || "")}?subject=${encodeURIComponent(event.name + " — Check-In QR Code")}&body=${encodeURIComponent(body)}`; };
+  const mailtoFallback = (p) => { const body = `Hi ${p.name},\n\nYou're confirmed for ${event.name}.\nPlease present your QR code at check-in. Code ID: ${p.token}\n\nSee you there!`; window.location.href = `mailto:${encodeURIComponent(p.email || "")}?subject=${encodeURIComponent(event.name + " - Check-In QR Code")}&body=${encodeURIComponent(body)}`; };
   const emailOne = async (p) => {
     if (!p.email) { notify("No email for " + p.name); return; }
     setSending(p.id); const tn = tableName(p._att?.table_id);
     try {
       const res = await fetch("/api/send-qr", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to: p.email, name: p.name, token: p.token, qrPng: qrDataUrl(p.token, 8, 4), event: event.name, table: tn, seat: tn ? p._att.seat + 1 : null }) });
-      if (!res.ok) { if (res.status === 404 || res.status === 501) { notify("Email service not set up — opening Mail"); mailtoFallback(p); } else notify("Send failed: " + await res.text()); }
+      if (!res.ok) { if (res.status === 404 || res.status === 501) { notify("Email service not set up, opening Mail"); mailtoFallback(p); } else notify("Send failed: " + await res.text()); }
       else notify(`Sent to ${p.name}`);
-    } catch { notify("Email service unreachable — opening Mail"); mailtoFallback(p); }
+    } catch { notify("Email service unreachable, opening Mail"); mailtoFallback(p); }
     setSending(null);
   };
   const emailAll = async () => { const w = invited.filter(p => p.email); if (!w.length) { notify("No emails on file"); return; } notify(`Sending ${w.length}…`); for (const p of w) await emailOne(p); notify("Done"); };
@@ -868,7 +955,7 @@ function QrCenter({ roster, tables, event, notify }) {
     const doc = new jsPDF({ unit: "pt", format: "a4" }); const pw = doc.internal.pageSize.getWidth();
     const cols = 3, size = 130, gap = 24; const startX = (pw - (cols * size + (cols - 1) * gap)) / 2;
     let x = startX, y = 60, col = 0;
-    doc.setFontSize(18); doc.text(`${event.name} — Check-In QR Codes`, pw / 2, 36, { align: "center" });
+    doc.setFontSize(18); doc.text(`${event.name} - Check-In QR Codes`, pw / 2, 36, { align: "center" });
     for (const p of invited) {
       doc.addImage(qrDataUrl(p.token, 8, 2), "PNG", x, y, size, size);
       doc.setFontSize(10); doc.text(p.name, x + size / 2, y + size + 14, { align: "center" });
@@ -881,7 +968,7 @@ function QrCenter({ roster, tables, event, notify }) {
   return (
     <div style={{ padding: 24, height: "100%", overflowY: "auto" }}>
       <div style={S.qrHeader}>
-        <div><h2 style={{ margin: 0, fontFamily: DISPLAY }}>QR Codes — {event.name}</h2><div style={S.muted}>One permanent code per person. The same code works for every event they're invited to.</div></div>
+        <div><h2 style={{ margin: 0, fontFamily: DISPLAY }}>QR Codes - {event.name}</h2><div style={S.muted}>One permanent code per person. The same code works for every event they're invited to.</div></div>
         <div style={{ display: "flex", gap: 10 }}><button style={S.ghostBtn} onClick={emailAll}><Mail size={16} /> Email all</button><button style={S.primaryBtn} onClick={buildPdf}><Download size={16} /> PDF sheet (all)</button></div>
       </div>
       <div style={S.qrGrid}>
@@ -946,7 +1033,7 @@ function Scanner({ event, checkInByToken, roster, tables, addPerson, addToEvent,
         {!active && <div style={S.scanIdle}><Camera size={48} color="var(--accent)" /><p>Point the camera at a guest's QR code</p><button style={S.primaryBtn} onClick={start}><Camera size={16} /> Start camera</button></div>}
         {active && <button style={S.stopBtn} onClick={stop}>Stop</button>}
       </div>
-      {last && <div style={{ ...S.scanResult, background: last.note === "checked in" ? "var(--ok)" : "var(--accent)" }}><Check size={20} /> {last.name} — {last.note}</div>}
+      {last && <div style={{ ...S.scanResult, background: last.note === "checked in" ? "var(--ok)" : "var(--accent)" }}><Check size={20} /> {last.name}: {last.note}</div>}
       <div style={S.manualBox}><input placeholder="Or type/paste a code token…" value={manual} onChange={e => setManual(e.target.value)} style={S.field} /><button style={S.ghostBtn} onClick={() => { handle(manual); setManual(""); }}>Check in</button></div>
       <button style={{ ...S.ghostBtn, marginTop: 4 }} onClick={() => setWalkup(true)}><UserPlus size={16} /> Add walk-up guest</button>
       {seatPrompt && (
@@ -976,7 +1063,7 @@ function DoorSeatPrompt({ roster, tables, person, onClose, onSeat }) {
         <p style={S.muted}>They're checked in. Pick a table and an open seat.</p>
         <select value={tid} onChange={e => setTid(e.target.value)} style={{ ...S.select, width: "100%", marginBottom: 12 }}>{tables.map(tt => <option key={tt.id} value={tt.id}>{tt.name}</option>)}</select>
         {t && <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{Array.from({ length: t.seats }).map((_, i) => (<button key={i} disabled={taken.has(i)} onClick={() => onSeat(tid, i)} style={{ width: 44, height: 44, borderRadius: 10, border: "1px solid var(--line)", background: taken.has(i) ? "var(--surface)" : "var(--surface2)", color: taken.has(i) ? "var(--muted)" : "var(--text)", cursor: taken.has(i) ? "not-allowed" : "pointer", fontWeight: 600 }}>{i + 1}</button>))}</div>}
-        <button style={{ ...S.ghostBtn, marginTop: 14 }} onClick={onClose}>Skip — leave unseated</button>
+        <button style={{ ...S.ghostBtn, marginTop: 14 }} onClick={onClose}>Skip, leave unseated</button>
       </div>
     </div>
   );
@@ -1084,6 +1171,7 @@ const D = (() => {
     title: { margin: 0, fontFamily: "'Fraunces',Georgia,serif", fontWeight: 600, fontSize: "5.4vmin", lineHeight: 1.05, background: `linear-gradient(180deg,#fff, ${gold2})`, WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" },
     amp: { fontStyle: "italic", color: gold, WebkitTextFillColor: gold },
     subtitle: { fontSize: "1.9vmin", color: "#aeb8c4", marginTop: "0.4vmin" },
+    counts: { fontSize: "1.7vmin", color: gold2, marginTop: "0.6vmin", letterSpacing: ".02em" },
     grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 30vw), 1fr))", gap: "2vmin", alignContent: "start", position: "relative" },
     card: { background: "linear-gradient(160deg, rgba(31,37,45,.92), rgba(19,23,28,.92))", border: "1px solid rgba(212,175,106,.28)", borderRadius: 18, padding: "1.8vmin 2vmin", boxShadow: "0 14px 40px rgba(0,0,0,.4)", animation: "fadeUp .7s ease both" },
     cardHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1.2vmin", paddingBottom: "1vmin", borderBottom: "1px solid rgba(212,175,106,.25)" },
