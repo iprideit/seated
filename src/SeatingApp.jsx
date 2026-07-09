@@ -37,20 +37,24 @@ function makeSupabase(url, key) {
   };
   const merge = { Prefer: "resolution=merge-duplicates,return=representation" };
   return {
-    listEvents: () => req("/events?select=*&order=created_at"),
-    listPeople: () => req("/people?select=*&order=created_at"),
-    listTables: () => req("/tables?select=*&order=created_at"),
-    listAttendance: () => req("/attendance?select=*&order=created_at"),
-    upsertEvent: (e) => req("/events", { method: "POST", headers: merge, body: JSON.stringify(e) }),
-    upsertPerson: (p) => req("/people", { method: "POST", headers: merge, body: JSON.stringify(p) }),
-    upsertTable: (t) => req("/tables", { method: "POST", headers: merge, body: JSON.stringify(t) }),
-    upsertAttendance: (a) => req("/attendance", { method: "POST", headers: merge, body: JSON.stringify(a) }),
+    listEvents: () => req("/events?select=*&order=created_at").then(norm),
+    listPeople: () => req("/people?select=*&order=created_at").then(norm),
+    listTables: () => req("/tables?select=*&order=created_at").then(norm),
+    listAttendance: () => req("/attendance?select=*&order=created_at").then(norm),
+    upsertEvent: (e) => req("/events", { method: "POST", headers: merge, body: JSON.stringify(stamp(e)) }),
+    upsertPerson: (p) => req("/people", { method: "POST", headers: merge, body: JSON.stringify(stamp(p)) }),
+    upsertTable: (t) => req("/tables", { method: "POST", headers: merge, body: JSON.stringify(stamp(t)) }),
+    upsertAttendance: (a) => req("/attendance", { method: "POST", headers: merge, body: JSON.stringify(stamp(a)) }),
     delEvent: (id) => req(`/events?id=eq.${id}`, { method: "DELETE" }),
     delPerson: (id) => req(`/people?id=eq.${id}`, { method: "DELETE" }),
     delTable: (id) => req(`/tables?id=eq.${id}`, { method: "DELETE" }),
     delAttendance: (id) => req(`/attendance?id=eq.${id}`, { method: "DELETE" }),
   };
 }
+// Add/refresh the updated_at stamp on any row we write. Strip client-only _ts.
+function stamp(row) { const { _ts, ...rest } = row; return { ...rest, updated_at: Date.now() }; }
+// Normalize server rows: expose updated_at as _ts for the merge logic.
+function norm(rows) { return (rows || []).map(r => ({ ...r, _ts: Number(r.updated_at) || 0 })); }
 
 // ---------- QR ----------
 function qrDataUrl(text, scale = 8, margin = 4) {
@@ -108,20 +112,31 @@ export default function App() {
     const t = recentEdits.current.get(`${kind}:${id}`);
     return t && (Date.now() - t < 8000);
   };
-  // Merge helper: keep our local version of any row edited very recently,
-  // otherwise take the server's version. Also keeps purely-local rows the
-  // server hasn't seen yet.
+  // Merge helper: for each row, keep whichever version (local or server) has the
+  // newer `_ts` timestamp. This makes conflict resolution device-independent — a
+  // stale echo from another device can never overwrite a newer local edit, and a
+  // newer edit from another device flows in correctly. Rows we edited in the last
+  // few seconds are also hard-protected as a belt-and-suspenders measure.
   const mergeRows = (kind, local, server) => {
     const serverById = new Map(server.map(r => [r.id, r]));
+    const localById = new Map(local.map(r => [r.id, r]));
     const out = [];
     const seen = new Set();
     for (const r of local) {
       seen.add(r.id);
-      if (isProtected(kind, r.id)) out.push(r);            // protect recent edits
-      else if (serverById.has(r.id)) out.push(serverById.get(r.id));
-      // else: row was deleted on server and not protected -> drop it
+      const s = serverById.get(r.id);
+      if (isProtected(kind, r.id)) { out.push(r); continue; }   // recent local edit wins
+      if (!s) {
+        // Not on server. Keep it only if it's a very fresh local row (server hasn't
+        // caught up yet); otherwise it was deleted elsewhere -> drop.
+        if ((Date.now() - (r._ts || 0)) < 8000) out.push(r);
+        continue;
+      }
+      // Both exist: newer timestamp wins.
+      const lt = r._ts || 0, st = s._ts || 0;
+      out.push(st >= lt ? s : r);
     }
-    for (const r of server) if (!seen.has(r.id)) out.push(r); // new rows from others
+    for (const r of server) if (!seen.has(r.id)) out.push(r);    // new rows from others
     return out;
   };
 
@@ -173,7 +188,7 @@ export default function App() {
 
   // ---- EVENT ops ----
   const addEvent = async (name, kind) => {
-    const e = { id: uid(), name, kind };
+    const e = { id: uid(), name, kind, _ts: Date.now() };
     markEdit('event', e.id);
     setEvents(p => [...p, e]); setActiveEventId(e.id);
     if (sb) try { await sb.upsertEvent(e); } catch (err) { notify(err.message); }
@@ -190,7 +205,7 @@ export default function App() {
 
   // ---- PERSON ops ----
   const addPerson = async (data) => {
-    const p = { id: uid(), token: uid() + uid(), name: data.name, email: data.email || "" };
+    const p = { id: uid(), token: uid() + uid(), name: data.name, email: data.email || "", _ts: Date.now() };
     markEdit('person', p.id);
     setPeople(prev => [...prev, p]);
     if (sb) try { await sb.upsertPerson(p); } catch (e) { notify(e.message); }
@@ -198,7 +213,7 @@ export default function App() {
   };
   const updatePerson = async (id, patch) => {
     markEdit('person', id);
-    let next; setPeople(prev => prev.map(p => p.id === id ? (next = { ...p, ...patch }) : p));
+    let next; setPeople(prev => prev.map(p => p.id === id ? (next = { ...p, ...patch, _ts: Date.now() }) : p));
     if (sb && next) try { await sb.upsertPerson({ id: next.id, token: next.token, name: next.name, email: next.email }); } catch (e) { notify(e.message); }
   };
   const removePerson = async (id) => {
@@ -213,7 +228,7 @@ export default function App() {
   const addToEvent = async (personId, eventId = activeEventId) => {
     if (!eventId) { notify("Create/select an event first"); return null; }
     const existing = attFor(personId, eventId); if (existing) return existing;
-    const a = { id: uid(), event_id: eventId, person_id: personId, table_id: null, seat: null, checked_in: false };
+    const a = { id: uid(), event_id: eventId, person_id: personId, table_id: null, seat: null, checked_in: false, _ts: Date.now() };
     markEdit('att', a.id);
     setAttendance(p => [...p, a]);
     if (sb) try { await sb.upsertAttendance(a); } catch (e) { notify(e.message); }
@@ -224,8 +239,8 @@ export default function App() {
     // Build the updated row deterministically from current state so the DB
     // write always reflects the intended change (no reliance on updater timing).
     const current = attendance.find(a => a.id === id);
-    const next = current ? { ...current, ...patch } : null;
-    setAttendance(p => p.map(a => a.id === id ? { ...a, ...patch } : a));
+    const next = current ? { ...current, ...patch, _ts: Date.now() } : null;
+    setAttendance(p => p.map(a => a.id === id ? { ...a, ...patch, _ts: Date.now() } : a));
     if (sb && next) try { await sb.upsertAttendance(next); } catch (e) { notify(e.message); }
     return next;
   };
@@ -238,7 +253,7 @@ export default function App() {
     // Find or create the attendance row for this person in the active event.
     let a = attFor(personId);
     if (!a) {
-      a = { id: uid(), event_id: activeEventId, person_id: personId, table_id: null, seat: null, checked_in: false };
+      a = { id: uid(), event_id: activeEventId, person_id: personId, table_id: null, seat: null, checked_in: false, _ts: Date.now() };
       markEdit('att', a.id);
       setAttendance(p => [...p, a]);
       if (sb) try { await sb.upsertAttendance(a); } catch (e) { notify(e.message); }
@@ -248,15 +263,15 @@ export default function App() {
       const occ = attendance.find(x => x.event_id === activeEventId && x.table_id === tableId && x.seat === seat && x.person_id !== personId);
       if (occ) {
         markEdit('att', occ.id);
-        const freed = { ...occ, table_id: null, seat: null };
+        const freed = { ...occ, table_id: null, seat: null, _ts: Date.now() };
         setAttendance(p => p.map(x => x.id === occ.id ? freed : x));
         if (sb) try { await sb.upsertAttendance(freed); } catch (e) { notify(e.message); }
       }
     }
     // Write the assignment directly from the row we hold, not from stale state.
     markEdit('att', a.id);
-    const updated = { ...a, table_id: tableId, seat };
-    setAttendance(p => p.map(x => x.id === a.id ? { ...x, table_id: tableId, seat } : x));
+    const updated = { ...a, table_id: tableId, seat, _ts: Date.now() };
+    setAttendance(p => p.map(x => x.id === a.id ? { ...x, table_id: tableId, seat, _ts: Date.now() } : x));
     if (sb) try { await sb.upsertAttendance(updated); } catch (e) { notify(e.message); }
   };
 
@@ -264,14 +279,14 @@ export default function App() {
   const addTable = async (shape) => {
     if (!activeEventId) { notify("Create/select an event first"); return; }
     const evTables = tables.filter(t => t.event_id === activeEventId);
-    const t = { id: uid(), event_id: activeEventId, name: `Table ${evTables.length + 1}`, shape, seats: shape === "round" ? 8 : 6, x: 120 + (evTables.length % 4) * 220, y: 120 + Math.floor(evTables.length / 4) * 240 };
+    const t = { id: uid(), event_id: activeEventId, name: `Table ${evTables.length + 1}`, shape, seats: shape === "round" ? 8 : 6, x: 120 + (evTables.length % 4) * 220, y: 120 + Math.floor(evTables.length / 4) * 240, _ts: Date.now() };
     markEdit('table', t.id);
     setTables(p => [...p, t]);
     if (sb) try { await sb.upsertTable(t); } catch (e) { notify(e.message); }
   };
   const updateTable = async (id, patch) => {
     markEdit('table', id);
-    let next; setTables(p => p.map(t => t.id === id ? (next = { ...t, ...patch }) : t));
+    let next; setTables(p => p.map(t => t.id === id ? (next = { ...t, ...patch, _ts: Date.now() }) : t));
     if (sb && next) try { await sb.upsertTable(next); } catch (e) { notify(e.message); }
   };
   const removeTable = async (id) => {
@@ -818,17 +833,17 @@ function SettingsPanel({ sb, sbInfo, connect, disconnect }) {
   const schema = `-- Run in Supabase SQL editor (multi-event schema)
 create table events (
   id text primary key, name text, kind text default 'seated',
-  created_at timestamptz default now());
+  created_at timestamptz default now(), updated_at bigint);
 create table people (
   id text primary key, name text, email text, token text,
-  created_at timestamptz default now());
+  created_at timestamptz default now(), updated_at bigint);
 create table tables (
   id text primary key, event_id text, name text, shape text,
-  seats int, x float, y float, created_at timestamptz default now());
+  seats int, x float, y float, created_at timestamptz default now(), updated_at bigint);
 create table attendance (
   id text primary key, event_id text, person_id text,
   table_id text, seat int, checked_in bool default false,
-  created_at timestamptz default now());
+  created_at timestamptz default now(), updated_at bigint);
 alter table events enable row level security;
 alter table people enable row level security;
 alter table tables enable row level security;
