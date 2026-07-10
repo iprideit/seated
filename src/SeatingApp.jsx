@@ -737,7 +737,7 @@ function DisplayBoard({ event, tables, roster, onExit }) {
         <img src="/logo.png" alt="" style={D.logo} onError={(e) => { e.currentTarget.style.display = "none"; }} />
         <div style={D.titleWrap}>
           <div style={D.kicker}>NAGAAA · EST. 1997</div>
-          <h1 style={D.title}>Hall of Fame Dinner <span style={D.amp}>&amp;</span> iPride Awards</h1>
+          <h1 style={D.title}>Hall of Fame Dinner <span style={D.amp}>&amp;</span> iPride Honors</h1>
           <div style={D.subtitle}>Welcome! Please have your QR code ready to present at check-in</div>
           <div style={D.counts}>{yetToArrive} yet to arrive · {totalIn} checked in</div>
         </div>
