@@ -524,7 +524,7 @@ export default function App() {
         {activeEvent && view === "scan" && (
           <Scanner event={activeEvent} checkInByToken={checkInByToken} roster={roster} tables={evTables} addPerson={addPerson} addToEvent={addToEvent} assignSeat={assignSeat} updateAttendance={updateAttendance} attFor={attFor} notify={notify} />
         )}
-        {view === "events" && <EventsManager events={events} addEvent={addEvent} removeEvent={removeEvent} activeEventId={activeEventId} setActiveEventId={setActiveEventId} attendance={attendance} />}
+        {view === "events" && <EventsManager events={events} addEvent={addEvent} removeEvent={removeEvent} updateEvent={updateEvent} activeEventId={activeEventId} setActiveEventId={setActiveEventId} attendance={attendance} />}
         {view === "settings" && <SettingsPanel sb={sb} sbInfo={sbInfo} connect={connectSupabase} disconnect={disconnectSupabase} />}
       </main>
       {toast && <div style={S.toast}>{toast}</div>}
@@ -602,7 +602,7 @@ function NoEvent({ onCreate }) {
 // ============================================================
 //  Events manager
 // ============================================================
-function EventsManager({ events, addEvent, removeEvent, activeEventId, setActiveEventId, attendance }) {
+function EventsManager({ events, addEvent, removeEvent, updateEvent, activeEventId, setActiveEventId, attendance }) {
   const [name, setName] = useState(""); const [kind, setKind] = useState("seated");
   return (
     <div style={{ padding: 24, maxWidth: 760, margin: "0 auto" }}>
@@ -621,6 +621,15 @@ function EventsManager({ events, addEvent, removeEvent, activeEventId, setActive
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}><b>{e.name}</b><span style={S.eventKind}>{e.kind}</span>{e.id === activeEventId && <span style={{ ...S.gridBadge, background: "var(--accent)", color: "#1a1407" }}>active</span>}</div>
                 <div style={S.muted}>{count} invited · {ins} checked in</div>
+                {e.kind === "seated" && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                    <span style={S.muted}>TV page time:</span>
+                    <input type="number" min="2" max="60" value={e.tv_seconds || 10}
+                      onChange={ev => updateEvent(e.id, { tv_seconds: Number(ev.target.value) || 10 })}
+                      style={{ ...S.field, width: 70, padding: "5px 8px" }} />
+                    <span style={S.muted}>seconds</span>
+                  </div>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 {e.id !== activeEventId && <button style={S.ghostBtn} onClick={() => setActiveEventId(e.id)}>Make active</button>}
@@ -986,10 +995,12 @@ function DisplayBoard({ event, tables, roster, onExit }) {
   // Keep the current page valid if tables/perPage change.
   useEffect(() => { if (page >= pageCount) setPage(0); }, [pageCount, page]);
 
-  // ---- Auto-cycle pages every 15s with a vertical slide (airport board) ----
+  // ---- Auto-cycle pages with a vertical slide (airport board) ----
+  // Hold time is configurable per event (event.tv_seconds), default 10s.
   useEffect(() => {
     if (pageCount <= 1) return;              // nothing to cycle
-    const HOLD = 15000, OUT = 650;           // visible time, slide-out time
+    const HOLD = Math.max(2000, (Number(event.tv_seconds) || 10) * 1000);
+    const OUT = 500;                          // slide-out duration
     const t1 = setTimeout(() => {
       setAnim("out");
       const t2 = setTimeout(() => {
@@ -999,7 +1010,7 @@ function DisplayBoard({ event, tables, roster, onExit }) {
       return () => clearTimeout(t2);
     }, HOLD);
     return () => clearTimeout(t1);
-  }, [page, pageCount]);
+  }, [page, pageCount, event.tv_seconds]);
 
   const visible = sorted.slice(page * perPage, page * perPage + perPage);
 
@@ -1022,7 +1033,7 @@ function DisplayBoard({ event, tables, roster, onExit }) {
 
       {/* Measured viewport for the cards. Pages slide up through this window. */}
       <div ref={areaRef} style={D.stage}>
-        <div key={page} style={{ ...D.grid, animation: anim === "out" ? "slideOutUp .65s ease forwards" : "slideInUp .65s ease both" }}>
+        <div key={page} style={{ ...D.grid, animation: anim === "out" ? "slideOutUp .5s ease forwards" : "slideInUp .5s ease both" }}>
           {visible.map(t => {
             const occ = roster.filter(r => r.table_id === t.id).sort((a, b) => a.seat - b.seat);
             return (
