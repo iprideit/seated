@@ -41,6 +41,9 @@ function makeSupabase(url, key) {
     listPeople: () => req("/people?select=*&order=created_at").then(norm),
     listTables: () => req("/tables?select=*&order=created_at").then(norm),
     listAttendance: () => req("/attendance?select=*&order=created_at").then(norm),
+    listFixtures: () => req("/fixtures?select=*&order=created_at").then(norm),
+    upsertFixture: (f) => req("/fixtures", { method: "POST", headers: merge, body: JSON.stringify(stamp(f)) }),
+    delFixture: (id) => req(`/fixtures?id=eq.${id}`, { method: "DELETE" }),
     upsertEvent: (e) => req("/events", { method: "POST", headers: merge, body: JSON.stringify(stamp(e)) }),
     upsertPerson: (p) => req("/people", { method: "POST", headers: merge, body: JSON.stringify(stamp(p)) }),
     upsertTable: (t) => req("/tables", { method: "POST", headers: merge, body: JSON.stringify(stamp(t)) }),
@@ -69,10 +72,10 @@ function qrDataUrl(text, scale = 8, margin = 4) {
 }
 
 // ---------- seat geometry ----------
-function seatPositions(shape, seats, w, h) {
+function seatPositions(shape, seats, w, h, off = 26) {
   const pts = [];
   if (shape === "round") {
-    const cx = w / 2, cy = h / 2, rad = Math.min(w, h) / 2 + 26;
+    const cx = w / 2, cy = h / 2, rad = Math.min(w, h) / 2 + off;
     for (let i = 0; i < seats; i++) { const a = (i / seats) * Math.PI * 2 - Math.PI / 2; pts.push({ x: cx + rad * Math.cos(a), y: cy + rad * Math.sin(a) }); }
     return pts;
   }
@@ -80,10 +83,10 @@ function seatPositions(shape, seats, w, h) {
   const sideN = Math.max(0, Math.floor((seats - topN - botN) / 2));
   const layout = [];
   const place = (count, fn) => { for (let i = 0; i < count; i++) layout.push(fn(i, count)); };
-  place(topN, (i, c) => ({ x: ((i + 1) / (c + 1)) * w, y: -26 }));
-  place(sideN, (i, c) => ({ x: w + 26, y: ((i + 1) / (c + 1)) * h }));
-  place(botN, (i, c) => ({ x: w - ((i + 1) / (c + 1)) * w, y: h + 26 }));
-  place(seats - layout.length, (i, c) => ({ x: -26, y: h - ((i + 1) / (c + 1)) * h }));
+  place(topN, (i, c) => ({ x: ((i + 1) / (c + 1)) * w, y: -off }));
+  place(sideN, (i, c) => ({ x: w + off, y: ((i + 1) / (c + 1)) * h }));
+  place(botN, (i, c) => ({ x: w - ((i + 1) / (c + 1)) * w, y: h + off }));
+  place(seats - layout.length, (i, c) => ({ x: -off, y: h - ((i + 1) / (c + 1)) * h }));
   return layout.slice(0, seats);
 }
 
@@ -96,6 +99,7 @@ export default function App() {
   const [people, setPeople] = useState([]);
   const [tables, setTables] = useState([]);
   const [attendance, setAttendance] = useState([]);
+  const [fixtures, setFixtures] = useState([]);
   const [activeEventId, setActiveEventId] = useState(null);
   const [sb, setSb] = useState(null);
   const [sbInfo, setSbInfo] = useState(() => {
@@ -147,13 +151,17 @@ export default function App() {
     setLoading(true);
     try {
       const [ev, pe, tb, at] = await Promise.all([client.listEvents(), client.listPeople(), client.listTables(), client.listAttendance()]);
+      // Fixtures are optional: if the table hasn't been created yet, carry on.
+      let fx = [];
+      try { fx = await client.listFixtures(); } catch { fx = fixtures; }
       if (force) {
-        setEvents(ev); setPeople(pe); setTables(tb); setAttendance(at);
+        setEvents(ev); setPeople(pe); setTables(tb); setAttendance(at); setFixtures(fx);
       } else {
         setEvents(prev => mergeRows("event", prev, ev));
         setPeople(prev => mergeRows("person", prev, pe));
         setTables(prev => mergeRows("table", prev, tb));
         setAttendance(prev => mergeRows("att", prev, at));
+        setFixtures(prev => mergeRows("fixture", prev, fx));
       }
       setActiveEventId(prev => prev || (ev[0]?.id ?? null));
     } catch (e) { notify("Sync failed: " + e.message); }
@@ -199,6 +207,7 @@ export default function App() {
     setEvents(p => p.filter(e => e.id !== id));
     setTables(p => p.filter(t => t.event_id !== id));
     setAttendance(p => p.filter(a => a.event_id !== id));
+    setFixtures(p => p.filter(f => f.event_id !== id));
     if (activeEventId === id) setActiveEventId(events.find(e => e.id !== id)?.id ?? null);
     if (sb) try { await sb.delEvent(id); } catch (err) { notify(err.message); }
   };
@@ -278,8 +287,18 @@ export default function App() {
   // ---- TABLE ops ----
   const addTable = async (shape) => {
     if (!activeEventId) { notify("Create/select an event first"); return; }
+    const ev = events.find(e => e.id === activeEventId) || {};
+    const defSize = ev.default_table_in || 60;          // default diameter/width in inches
     const evTables = tables.filter(t => t.event_id === activeEventId);
-    const t = { id: uid(), event_id: activeEventId, name: `Table ${evTables.length + 1}`, shape, seats: shape === "round" ? 8 : 6, x: 120 + (evTables.length % 4) * 220, y: 120 + Math.floor(evTables.length / 4) * 240, _ts: Date.now() };
+    const t = {
+      id: uid(), event_id: activeEventId, name: `Table ${evTables.length + 1}`, shape,
+      seats: shape === "round" ? 10 : 8,
+      size_in: defSize,                                  // round: diameter; square: side; rect: width
+      len_in: shape === "rectangle" ? 96 : defSize,      // rect length (8ft banquet default)
+      x_ft: 6 + (evTables.length % 5) * 10,              // position in FEET
+      y_ft: 6 + Math.floor(evTables.length / 5) * 10,
+      _ts: Date.now(),
+    };
     markEdit('table', t.id);
     setTables(p => [...p, t]);
     if (sb) try { await sb.upsertTable(t); } catch (e) { notify(e.message); }
@@ -431,6 +450,32 @@ export default function App() {
     return { conflicts, added, updated, seated };
   };
 
+  // ---- FIXTURE ops (stage, bar, etc). Sizes in feet. ----
+  const addFixture = async (label, w_ft = 12, h_ft = 6) => {
+    if (!activeEventId) { notify("Select an event first"); return; }
+    const f = { id: uid(), event_id: activeEventId, name: label, x_ft: 4, y_ft: 4, w_ft, h_ft, _ts: Date.now() };
+    markEdit('fixture', f.id);
+    setFixtures(p => [...p, f]);
+    if (sb) try { await sb.upsertFixture(f); } catch (e) { notify(e.message); }
+  };
+  const updateFixture = async (id, patch) => {
+    markEdit('fixture', id);
+    let next; setFixtures(p => p.map(f => f.id === id ? (next = { ...f, ...patch, _ts: Date.now() }) : f));
+    if (sb && next) try { await sb.upsertFixture(next); } catch (e) { notify(e.message); }
+  };
+  const removeFixture = async (id) => {
+    markEdit('fixture', id);
+    setFixtures(p => p.filter(f => f.id !== id));
+    if (sb) try { await sb.delFixture(id); } catch (e) { notify(e.message); }
+  };
+
+  // ---- EVENT room settings (dimensions in feet, default table size in inches) ----
+  const updateEvent = async (id, patch) => {
+    markEdit('event', id);
+    let next; setEvents(p => p.map(e => e.id === id ? (next = { ...e, ...patch, _ts: Date.now() }) : e));
+    if (sb && next) try { await sb.upsertEvent(next); } catch (e) { notify(e.message); }
+  };
+
   // ---- DOOR check-in ----
   const checkInByToken = async (token) => {
     if (!activeEventId) return { status: "no_event" };
@@ -462,7 +507,11 @@ export default function App() {
       <main style={S.main}>
         {!activeEvent && view !== "settings" && view !== "people" && view !== "events" && <NoEvent onCreate={addEvent} />}
         {activeEvent && view === "floor" && activeEvent.kind === "seated" && (
-          <FloorPlan tables={evTables} roster={roster} people={people} addTable={addTable} updateTable={updateTable} removeTable={removeTable} assignSeat={assignSeat} notify={notify} />
+          <FloorPlan event={activeEvent} tables={evTables} fixtures={fixtures.filter(f => f.event_id === activeEventId)}
+            roster={roster} people={people}
+            addTable={addTable} updateTable={updateTable} removeTable={removeTable}
+            addFixture={addFixture} updateFixture={updateFixture} removeFixture={removeFixture}
+            updateEvent={updateEvent} assignSeat={assignSeat} notify={notify} />
         )}
         {activeEvent && view === "grid" && activeEvent.kind === "seated" && <TableGrid tables={evTables} roster={roster} />}
         {view === "people" && (
@@ -587,41 +636,178 @@ function EventsManager({ events, addEvent, removeEvent, activeEventId, setActive
 }
 
 // ============================================================
-//  Floor Plan
+//  Floor Plan (true-to-scale, feet/inches)
 // ============================================================
-function FloorPlan({ tables, roster, people, addTable, updateTable, removeTable, assignSeat, notify }) {
+// The room is defined in FEET (event.room_w_ft x event.room_h_ft).
+// Tables carry real dimensions in INCHES (size_in = diameter/width,
+// len_in = length for rectangles). Everything is drawn at a computed
+// pixels-per-foot scale so the layout is a faithful representation.
+function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTable, removeTable,
+                     addFixture, updateFixture, removeFixture, updateEvent, assignSeat, notify }) {
   const areaRef = useRef(null);
-  const [drag, setDrag] = useState(null);
+  const [drag, setDrag] = useState(null);       // {kind:'table'|'fixture', id, dxFt, dyFt}
   const [picker, setPicker] = useState(null);
-  const onPointerDown = (e, t) => { const rect = areaRef.current.getBoundingClientRect(); setDrag({ id: t.id, dx: e.clientX - rect.left - t.x, dy: e.clientY - rect.top - t.y }); };
+  const [sel, setSel] = useState(null);         // selected fixture id (for resize panel)
+  const [box, setBox] = useState({ w: 0, h: 0 });
+
+  const roomW = Number(event.room_w_ft) || 60;  // feet
+  const roomH = Number(event.room_h_ft) || 40;
+  const snap = !!event.snap_on;
+  const snapFt = 1;                              // 1-foot grid
+
+  // Fit the room into the available area, keeping aspect ratio.
+  useEffect(() => {
+    const measure = () => {
+      const el = areaRef.current; if (!el) return;
+      setBox({ w: el.clientWidth, h: el.clientHeight });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  const pad = 24;
+  const scale = Math.max(2, Math.min((box.w - pad * 2) / roomW, (box.h - pad * 2) / roomH)); // px per foot
+  const roomPxW = roomW * scale, roomPxH = roomH * scale;
+  const ft = (v) => v * scale;                   // feet -> px
+  const inToFt = (i) => (Number(i) || 0) / 12;
+
+  const doSnap = (v) => snap ? Math.round(v / snapFt) * snapFt : v;
+
+  const startDrag = (e, kind, item) => {
+    const rect = areaRef.current.getBoundingClientRect();
+    const originX = rect.left + (rect.width - roomPxW) / 2;
+    const originY = rect.top + (rect.height - roomPxH) / 2;
+    const curX = kind === "table" ? (Number(item.x_ft) || 0) : (Number(item.x_ft) || 0);
+    const curY = kind === "table" ? (Number(item.y_ft) || 0) : (Number(item.y_ft) || 0);
+    const pointerFtX = (e.clientX - originX) / scale;
+    const pointerFtY = (e.clientY - originY) / scale;
+    setDrag({ kind, id: item.id, dxFt: pointerFtX - curX, dyFt: pointerFtY - curY });
+  };
   useEffect(() => {
     if (!drag) return;
-    const move = (e) => { const rect = areaRef.current.getBoundingClientRect(); updateTable(drag.id, { x: Math.max(60, e.clientX - rect.left - drag.dx), y: Math.max(60, e.clientY - rect.top - drag.dy) }); };
+    const move = (e) => {
+      const rect = areaRef.current.getBoundingClientRect();
+      const originX = rect.left + (rect.width - roomPxW) / 2;
+      const originY = rect.top + (rect.height - roomPxH) / 2;
+      let nx = (e.clientX - originX) / scale - drag.dxFt;
+      let ny = (e.clientY - originY) / scale - drag.dyFt;
+      nx = doSnap(Math.max(0, Math.min(roomW, nx)));
+      ny = doSnap(Math.max(0, Math.min(roomH, ny)));
+      if (drag.kind === "table") updateTable(drag.id, { x_ft: nx, y_ft: ny });
+      else updateFixture(drag.id, { x_ft: nx, y_ft: ny });
+    };
     const up = () => setDrag(null);
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
     return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
-  }, [drag]); // eslint-disable-line
+  }, [drag, scale, roomPxW, roomPxH, roomW, roomH, snap]); // eslint-disable-line
+
   const unseated = roster.filter(r => r.table_id == null);
+  const selFixture = fixtures.find(f => f.id === sel);
+  const [newFixName, setNewFixName] = useState("");
+
   return (
     <div style={{ display: "flex", height: "100%" }}>
-      <div style={S.toolbar}>
-        <div style={S.toolTitle}>ADD TABLE</div>
+      <div style={{ ...S.toolbar, width: 262, overflowY: "auto" }}>
+        <div style={S.toolTitle}>ROOM SIZE (FEET)</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="number" min="10" value={roomW} onChange={e => updateEvent(event.id, { room_w_ft: Number(e.target.value) || 0 })} style={{ ...S.field, width: 78 }} />
+          <span style={S.muted}>×</span>
+          <input type="number" min="10" value={roomH} onChange={e => updateEvent(event.id, { room_h_ft: Number(e.target.value) || 0 })} style={{ ...S.field, width: 78 }} />
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--dim)", marginTop: 4 }}>
+          <input type="checkbox" checked={snap} onChange={e => updateEvent(event.id, { snap_on: e.target.checked })} />
+          Snap to 1 ft grid
+        </label>
+
+        <div style={{ ...S.toolTitle, marginTop: 14 }}>DEFAULT TABLE (INCHES)</div>
+        <input type="number" min="24" value={event.default_table_in || 60}
+          onChange={e => updateEvent(event.id, { default_table_in: Number(e.target.value) || 60 })}
+          style={{ ...S.field, width: "100%" }} />
+        <div style={S.muted}>Used for new tables. Override any table below.</div>
+
+        <div style={{ ...S.toolTitle, marginTop: 14 }}>ADD TABLE</div>
         <button style={S.toolBtn} onClick={() => addTable("round")}><Circle size={18} /> Round</button>
         <button style={S.toolBtn} onClick={() => addTable("square")}><Square size={18} /> Square</button>
         <button style={S.toolBtn} onClick={() => addTable("rectangle")}><RectangleHorizontal size={18} /> Rectangle</button>
-        <div style={{ ...S.toolTitle, marginTop: 18 }}>UNSEATED ({unseated.length})</div>
-        <div style={{ overflowY: "auto", flex: 1 }}>
+
+        <div style={{ ...S.toolTitle, marginTop: 14 }}>ADD FIXTURE</div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <input placeholder="Stage, Bar, DJ..." value={newFixName} onChange={e => setNewFixName(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && newFixName.trim()) { addFixture(newFixName.trim()); setNewFixName(""); } }}
+            style={{ ...S.field, flex: 1, minWidth: 0 }} />
+          <button style={S.primaryBtn} onClick={() => { if (newFixName.trim()) { addFixture(newFixName.trim()); setNewFixName(""); } }}><Plus size={15} /></button>
+        </div>
+
+        {selFixture && (
+          <div style={{ marginTop: 12, padding: 10, borderRadius: 10, background: "var(--surface2)", border: "1px solid var(--accent)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <b style={{ fontSize: 13 }}>{selFixture.name}</b>
+              <button style={S.iconBtn} onClick={() => { removeFixture(selFixture.id); setSel(null); }}><Trash2 size={14} /></button>
+            </div>
+            <div style={{ ...S.muted, marginBottom: 4 }}>Size in feet (W × H)</div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input type="number" min="1" value={selFixture.w_ft} onChange={e => updateFixture(selFixture.id, { w_ft: Number(e.target.value) || 1 })} style={{ ...S.field, width: 68 }} />
+              <span style={S.muted}>×</span>
+              <input type="number" min="1" value={selFixture.h_ft} onChange={e => updateFixture(selFixture.id, { h_ft: Number(e.target.value) || 1 })} style={{ ...S.field, width: 68 }} />
+            </div>
+            <button style={{ ...S.ghostBtn, marginTop: 8, width: "100%" }} onClick={() => setSel(null)}>Done</button>
+          </div>
+        )}
+
+        <div style={{ ...S.toolTitle, marginTop: 14 }}>UNSEATED ({unseated.length})</div>
+        <div style={{ overflowY: "auto", maxHeight: 160 }}>
           {unseated.map(r => <div key={r.id} style={{ ...S.unseatChip, borderColor: r.checked_in ? "var(--ok)" : "var(--line)" }}>{r.person.name}{r.checked_in ? " ✓" : ""}</div>)}
           {unseated.length === 0 && <div style={S.muted}>Everyone seated</div>}
         </div>
-        <div style={S.hint}>Green = checked in · amber = seated, not yet in · drag tables to arrange</div>
+        <div style={S.hint}>Room shown to scale. Drag tables and fixtures. Click a fixture to resize it.</div>
       </div>
-      <div ref={areaRef} style={S.canvas}>
-        {tables.length === 0 && <div style={S.empty}>Add a table to begin →</div>}
-        {tables.map(t => (
-          <TableNode key={t.id} t={t} roster={roster} onDown={onPointerDown} onSeat={(seat) => setPicker({ tableId: t.id, seat })} onRemove={() => removeTable(t.id)} onRename={(name) => updateTable(t.id, { name })} onSeats={(seats) => updateTable(t.id, { seats: Math.max(1, Math.min(20, seats)) })} />
-        ))}
+
+      <div ref={areaRef} style={{ ...S.canvas, display: "flex", alignItems: "center", justifyContent: "center", backgroundImage: "none" }}>
+        {/* The room, drawn to scale */}
+        <div style={{
+          position: "relative", width: roomPxW, height: roomPxH,
+          background: "repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0 1px, transparent 1px " + scale + "px), repeating-linear-gradient(90deg, rgba(255,255,255,.035) 0 1px, transparent 1px " + scale + "px), #101318",
+          border: "2px solid var(--accent)", borderRadius: 6, boxShadow: "0 0 0 1px rgba(0,0,0,.4), inset 0 0 60px rgba(0,0,0,.5)",
+        }}>
+          {/* dimension labels */}
+          <div style={{ position: "absolute", top: -22, left: 0, right: 0, textAlign: "center", fontSize: 11, color: "var(--accent2)", letterSpacing: 1 }}>{roomW} ft</div>
+          <div style={{ position: "absolute", left: -34, top: 0, bottom: 0, display: "flex", alignItems: "center", fontSize: 11, color: "var(--accent2)", letterSpacing: 1, transform: "rotate(-90deg)", transformOrigin: "center" }}>{roomH} ft</div>
+
+          {/* fixtures behind tables */}
+          {fixtures.map(f => (
+            <div key={f.id}
+              onPointerDown={(e) => { e.stopPropagation(); setSel(f.id); startDrag(e, "fixture", f); }}
+              title={`${f.name} (${f.w_ft} × ${f.h_ft} ft)`}
+              style={{
+                position: "absolute", left: ft(f.x_ft), top: ft(f.y_ft),
+                width: ft(f.w_ft), height: ft(f.h_ft), cursor: "grab",
+                background: "rgba(143,224,171,.14)", border: "2px solid " + (sel === f.id ? "var(--accent)" : "rgba(143,224,171,.6)"),
+                borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center",
+                color: "#bde9cd", fontSize: Math.max(9, Math.min(14, scale * 0.9)), fontWeight: 600, textAlign: "center", userSelect: "none", overflow: "hidden",
+              }}>
+              {f.name}
+            </div>
+          ))}
+
+          {/* tables */}
+          {tables.map(t => (
+            <TableNode key={t.id} t={t} roster={roster} scale={scale}
+              onDown={(e) => startDrag(e, "table", t)}
+              onSeat={(seat) => setPicker({ tableId: t.id, seat })}
+              onRemove={() => removeTable(t.id)}
+              onRename={(name) => updateTable(t.id, { name })}
+              onSeats={(seats) => updateTable(t.id, { seats: Math.max(1, Math.min(24, seats)) })}
+              onSize={(patch) => updateTable(t.id, patch)} />
+          ))}
+
+          {tables.length === 0 && fixtures.length === 0 && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontFamily: DISPLAY, fontSize: 18 }}>
+              Set your room size, then add tables
+            </div>
+          )}
+        </div>
       </div>
+
       {picker && (
         <SeatPicker roster={roster} people={people} table={tables.find(t => t.id === picker.tableId)} seat={picker.seat}
           onPick={async (pid) => { await assignSeat(pid, picker.tableId, picker.seat); setPicker(null); }}
@@ -632,34 +818,72 @@ function FloorPlan({ tables, roster, people, addTable, updateTable, removeTable,
   );
 }
 
-function TableNode({ t, roster, onDown, onSeat, onRemove, onRename, onSeats }) {
-  const w = t.shape === "rectangle" ? 150 : 96, h = t.shape === "rectangle" ? 80 : 96;
-  const pts = seatPositions(t.shape, t.seats, w, h);
+function TableNode({ t, roster, scale, onDown, onSeat, onRemove, onRename, onSeats, onSize }) {
+  // Real dimensions, inches -> feet -> pixels
+  const sizeIn = Number(t.size_in) || 60;
+  const lenIn = Number(t.len_in) || sizeIn;
+  const wFt = (t.shape === "rectangle" ? lenIn : sizeIn) / 12;
+  const hFt = sizeIn / 12;
+  const w = Math.max(18, wFt * scale), h = Math.max(18, hFt * scale);
+  const pts = seatPositions(t.shape, t.seats, w, h, Math.max(9, scale * 0.55));
   const occBy = (i) => roster.find(r => r.table_id === t.id && r.seat === i);
   const [nameEdit, setNameEdit] = useState(t.name);
   const [editing, setEditing] = useState(false);
-  // Keep local field in sync with server value when we're NOT actively editing.
+  const [open, setOpen] = useState(false);
   useEffect(() => { if (!editing) setNameEdit(t.name); }, [t.name, editing]);
   const commitName = () => { setEditing(false); if (nameEdit !== t.name) onRename(nameEdit); };
+  const seatPx = Math.max(11, Math.min(30, scale * 0.62));
+  const fontPx = Math.max(7, Math.min(12, scale * 0.32));
+
   return (
-    <div style={{ position: "absolute", left: t.x, top: t.y, transform: "translate(-50%,-50%)" }}>
+    <div style={{ position: "absolute", left: (Number(t.x_ft) || 0) * scale, top: (Number(t.y_ft) || 0) * scale, transform: "translate(-50%,-50%)" }}>
       <div style={{ position: "relative", width: w, height: h }}>
-        <div onPointerDown={(e) => onDown(e, t)} style={{ width: w, height: h, cursor: "grab", borderRadius: t.shape === "round" ? "50%" : 14, background: "linear-gradient(145deg,var(--surface2),var(--surface))", border: "2px solid var(--line)", boxShadow: "0 8px 24px rgba(0,0,0,.35)", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", userSelect: "none" }}>
-          <input value={nameEdit}
-            onFocus={() => setEditing(true)}
-            onChange={e => setNameEdit(e.target.value)}
-            onBlur={commitName}
-            onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }}
-            onPointerDown={e => e.stopPropagation()} style={S.tableName} />
-          <div style={S.seatCount}><button onPointerDown={e => e.stopPropagation()} onClick={() => onSeats(t.seats - 1)} style={S.tinyBtn}>−</button>{t.seats}<button onPointerDown={e => e.stopPropagation()} onClick={() => onSeats(t.seats + 1)} style={S.tinyBtn}>+</button></div>
+        <div onPointerDown={onDown} onDoubleClick={() => setOpen(o => !o)}
+          style={{ width: w, height: h, cursor: "grab", borderRadius: t.shape === "round" ? "50%" : 6,
+            background: "linear-gradient(145deg,var(--surface2),var(--surface))", border: "2px solid var(--line)",
+            boxShadow: "0 6px 18px rgba(0,0,0,.4)", display: "flex", alignItems: "center", justifyContent: "center", userSelect: "none", overflow: "hidden" }}>
+          <span style={{ fontSize: fontPx, fontWeight: 600, color: "var(--text)", textAlign: "center", padding: 2, lineHeight: 1.1 }}>{t.name}</span>
         </div>
-        <button onClick={onRemove} style={S.delTable}><Trash2 size={12} /></button>
+
+        {/* seats */}
         {pts.map((p, i) => {
           const r = occBy(i); const color = r ? (r.checked_in ? "var(--ok)" : "var(--accent)") : "var(--line)";
           return (
-            <button key={i} onClick={() => onSeat(i)} title={r ? r.person.name : "Empty"} style={{ position: "absolute", left: p.x, top: p.y, transform: "translate(-50%,-50%)", width: 30, height: 30, borderRadius: "50%", cursor: "pointer", fontSize: 10, fontWeight: 700, border: "2px solid " + color, background: r ? color : "var(--surface)", color: r ? "#0a0a0a" : "var(--dim)", display: "flex", alignItems: "center", justifyContent: "center" }}>{r ? (r.checked_in ? <Check size={13} /> : initials(r.person.name)) : i + 1}</button>
+            <button key={i} onPointerDown={e => e.stopPropagation()} onClick={() => onSeat(i)} title={r ? r.person.name : "Empty"}
+              style={{ position: "absolute", left: p.x, top: p.y, transform: "translate(-50%,-50%)", width: seatPx, height: seatPx,
+                borderRadius: "50%", cursor: "pointer", fontSize: Math.max(6, seatPx * 0.42), fontWeight: 700,
+                border: "1px solid " + color, background: r ? color : "var(--surface)", color: r ? "#0a0a0a" : "var(--dim)",
+                display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+              {r ? (r.checked_in ? "✓" : initials(r.person.name)) : i + 1}
+            </button>
           );
         })}
+
+        {/* double-click editor */}
+        {open && (
+          <div onPointerDown={e => e.stopPropagation()}
+            style={{ position: "absolute", top: h / 2 + 14, left: "50%", transform: "translateX(-50%)", zIndex: 20,
+              background: "var(--surface)", border: "1px solid var(--accent)", borderRadius: 10, padding: 10, width: 190, boxShadow: "0 12px 30px rgba(0,0,0,.5)" }}>
+            <input value={nameEdit} onFocus={() => setEditing(true)} onChange={e => setNameEdit(e.target.value)}
+              onBlur={commitName} onKeyDown={e => { if (e.key === "Enter") e.target.blur(); }}
+              style={{ ...S.field, width: "100%", marginBottom: 8 }} />
+            <div style={{ ...S.muted, marginBottom: 4 }}>Seats</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <button style={S.tinyBtn} onClick={() => onSeats(t.seats - 1)}>−</button>
+              <b>{t.seats}</b>
+              <button style={S.tinyBtn} onClick={() => onSeats(t.seats + 1)}>+</button>
+            </div>
+            <div style={{ ...S.muted, marginBottom: 4 }}>{t.shape === "rectangle" ? "Width × Length (in)" : t.shape === "round" ? "Diameter (in)" : "Side (in)"}</div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <input type="number" min="18" value={sizeIn} onChange={e => onSize({ size_in: Number(e.target.value) || 60 })} style={{ ...S.field, width: t.shape === "rectangle" ? 70 : "100%" }} />
+              {t.shape === "rectangle" && <input type="number" min="18" value={lenIn} onChange={e => onSize({ len_in: Number(e.target.value) || 96 })} style={{ ...S.field, width: 70 }} />}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button style={{ ...S.ghostBtn, flex: 1 }} onClick={() => setOpen(false)}>Close</button>
+              <button style={{ ...S.iconBtn, color: "#ff9a9a" }} onClick={onRemove}><Trash2 size={15} /></button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -720,16 +944,68 @@ function TableGrid({ tables, roster }) {
 //  DisplayBoard — full-screen TV seating board for the entrance
 // ============================================================
 function DisplayBoard({ event, tables, roster, onExit }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const iv = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(iv); }, []);
   const totalIn = roster.filter(r => r.checked_in).length;
   const yetToArrive = roster.filter(r => !r.checked_in).length;
-  // Sort tables by their name in a natural order (Table 2 before Table 10).
+  // Sort tables naturally (Table 2 before Table 10).
   const sorted = [...tables].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+  const areaRef = useRef(null);
+  const [perPage, setPerPage] = useState(8);
+  const [page, setPage] = useState(0);
+  const [anim, setAnim] = useState("in"); // "in" | "out"
+
+  // ---- Auto-fit: measure the available area and work out how many cards fit ----
+  // We estimate a card's height from the largest table (seats drive the height),
+  // then compute columns from width and rows from height.
+  const maxSeats = sorted.reduce((m, t) => Math.max(m, t.seats), 0) || 10;
+  useEffect(() => {
+    const measure = () => {
+      const el = areaRef.current;
+      if (!el) return;
+      const W = el.clientWidth, H = el.clientHeight;
+      if (!W || !H) return;
+      const vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
+      const gap = 2 * vmin;
+      const minCardW = Math.min(340, window.innerWidth * 0.3);
+      // Card height ≈ header + (rows * row height) + padding
+      const rowH = 2.6 * vmin + 6;          // one guest row incl. gap
+      const headH = 5.6 * vmin;             // table name + divider
+      const padV = 3.6 * vmin;              // card vertical padding
+      const cardH = headH + padV + Math.max(1, maxSeats) * rowH;
+      const cols = Math.max(1, Math.floor((W + gap) / (minCardW + gap)));
+      const rows = Math.max(1, Math.floor((H + gap) / (cardH + gap)));
+      const fit = Math.max(1, cols * rows);
+      setPerPage(fit);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [maxSeats, sorted.length]);
+
+  const pageCount = Math.max(1, Math.ceil(sorted.length / perPage));
+  // Keep the current page valid if tables/perPage change.
+  useEffect(() => { if (page >= pageCount) setPage(0); }, [pageCount, page]);
+
+  // ---- Auto-cycle pages every 15s with a vertical slide (airport board) ----
+  useEffect(() => {
+    if (pageCount <= 1) return;              // nothing to cycle
+    const HOLD = 15000, OUT = 650;           // visible time, slide-out time
+    const t1 = setTimeout(() => {
+      setAnim("out");
+      const t2 = setTimeout(() => {
+        setPage(p => (p + 1) % pageCount);
+        setAnim("in");
+      }, OUT);
+      return () => clearTimeout(t2);
+    }, HOLD);
+    return () => clearTimeout(t1);
+  }, [page, pageCount]);
+
+  const visible = sorted.slice(page * perPage, page * perPage + perPage);
+
   return (
     <div style={D.wrap}>
       <style>{DISPLAY_CSS}</style>
-      {/* decorative background layers */}
       <div style={D.glowA} /><div style={D.glowB} /><div style={D.grain} />
       <button style={D.exit} onClick={onExit} title="Exit display"><XIcon size={20} /></button>
 
@@ -744,29 +1020,32 @@ function DisplayBoard({ event, tables, roster, onExit }) {
         <img src="/logo2.png" alt="" style={D.logo} onError={(e) => { e.currentTarget.style.display = "none"; }} />
       </header>
 
-      <div style={D.grid}>
-        {sorted.map(t => {
-          const occ = roster.filter(r => r.table_id === t.id).sort((a, b) => a.seat - b.seat);
-          return (
-            <div key={t.id} style={D.card}>
-              <div style={D.cardHead}>
-                <span style={D.tableName}>{t.name}</span>
-                <span style={D.tableCount}>{occ.length}/{t.seats}</span>
+      {/* Measured viewport for the cards. Pages slide up through this window. */}
+      <div ref={areaRef} style={D.stage}>
+        <div key={page} style={{ ...D.grid, animation: anim === "out" ? "slideOutUp .65s ease forwards" : "slideInUp .65s ease both" }}>
+          {visible.map(t => {
+            const occ = roster.filter(r => r.table_id === t.id).sort((a, b) => a.seat - b.seat);
+            return (
+              <div key={t.id} style={D.card}>
+                <div style={D.cardHead}>
+                  <span style={D.tableName}>{t.name}</span>
+                  <span style={D.tableCount}>{occ.length}/{t.seats}</span>
+                </div>
+                <div style={D.names}>
+                  {occ.length === 0 && <div style={D.emptyTable}>—</div>}
+                  {occ.map(r => (
+                    <div key={r.id} style={{ ...D.nameRow, ...(r.checked_in ? D.nameIn : {}) }}>
+                      <span style={D.seatDot}>{r.seat + 1}</span>
+                      <span style={D.personName}>{r.person.name}</span>
+                      {r.checked_in && <Check size={16} style={{ color: "#0c0f0c", flexShrink: 0 }} />}
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div style={D.names}>
-                {occ.length === 0 && <div style={D.emptyTable}>—</div>}
-                {occ.map(r => (
-                  <div key={r.id} style={{ ...D.nameRow, ...(r.checked_in ? D.nameIn : {}) }}>
-                    <span style={D.seatDot}>{r.seat + 1}</span>
-                    <span style={D.personName}>{r.person.name}</span>
-                    {r.checked_in && <Check size={16} style={{ color: "#0c0f0c", flexShrink: 0 }} />}
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })}
-        {sorted.length === 0 && <div style={{ ...D.emptyTable, gridColumn: "1/-1", fontSize: 28 }}>No tables yet</div>}
+            );
+          })}
+          {sorted.length === 0 && <div style={{ ...D.emptyTable, gridColumn: "1/-1", fontSize: 28 }}>No tables yet</div>}
+        </div>
       </div>
 
       <footer style={D.footer}>
@@ -1143,14 +1422,20 @@ create table attendance (
   id text primary key, event_id text, person_id text,
   table_id text, seat int, checked_in bool default false,
   created_at timestamptz default now(), updated_at bigint);
+create table fixtures (
+  id text primary key, event_id text, name text,
+  x_ft float, y_ft float, w_ft float, h_ft float,
+  created_at timestamptz default now(), updated_at bigint);
 alter table events enable row level security;
 alter table people enable row level security;
 alter table tables enable row level security;
 alter table attendance enable row level security;
+alter table fixtures enable row level security;
 create policy "all" on events for all using (true) with check (true);
 create policy "all" on people for all using (true) with check (true);
 create policy "all" on tables for all using (true) with check (true);
-create policy "all" on attendance for all using (true) with check (true);`;
+create policy "all" on attendance for all using (true) with check (true);
+create policy "all" on fixtures for all using (true) with check (true);`;
   return (
     <div style={{ padding: 24, maxWidth: 760, margin: "0 auto" }}>
       <h2 style={{ fontFamily: DISPLAY }}>Cloud Sync (Supabase)</h2>
@@ -1185,11 +1470,14 @@ const DISPLAY_CSS = `
 @keyframes floatA { 0%,100%{ transform:translate(-10%,-10%) scale(1);} 50%{ transform:translate(-6%,-4%) scale(1.15);} }
 @keyframes floatB { 0%,100%{ transform:translate(10%,10%) scale(1.1);} 50%{ transform:translate(4%,6%) scale(1);} }
 @keyframes fadeUp { from{ opacity:0; transform:translateY(14px);} to{ opacity:1; transform:none;} }
+@keyframes slideInUp { from{ opacity:0; transform:translateY(60px);} to{ opacity:1; transform:translateY(0);} }
+@keyframes slideOutUp { from{ opacity:1; transform:translateY(0);} to{ opacity:0; transform:translateY(-60px);} }
 `;
 const D = (() => {
   const gold = "#d4af6a", gold2 = "#e9c889", okD = "#8fe0ab";
   return {
-    wrap: { position: "fixed", inset: 0, background: "radial-gradient(ellipse at 50% 0%, #171b22, #0b0d10 70%)", color: "#e8edf2", fontFamily: "'Outfit',system-ui,sans-serif", overflow: "auto", padding: "3vmin 3.5vmin", "--gold": gold, "--okD": okD },
+    wrap: { position: "fixed", inset: 0, background: "radial-gradient(ellipse at 50% 0%, #171b22, #0b0d10 70%)", color: "#e8edf2", fontFamily: "'Outfit',system-ui,sans-serif", overflow: "hidden", padding: "3vmin 3.5vmin", display: "flex", flexDirection: "column", "--gold": gold, "--okD": okD },
+    stage: { flex: 1, position: "relative", overflow: "hidden", minHeight: 0 },
     glowA: { position: "fixed", top: 0, left: 0, width: "60vw", height: "60vw", background: "radial-gradient(circle, rgba(212,175,106,.10), transparent 60%)", animation: "floatA 18s ease-in-out infinite", pointerEvents: "none" },
     glowB: { position: "fixed", bottom: 0, right: 0, width: "55vw", height: "55vw", background: "radial-gradient(circle, rgba(143,224,171,.07), transparent 60%)", animation: "floatB 22s ease-in-out infinite", pointerEvents: "none" },
     grain: { position: "fixed", inset: 0, opacity: .04, pointerEvents: "none", backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")" },
@@ -1202,8 +1490,8 @@ const D = (() => {
     amp: { fontStyle: "italic", color: gold, WebkitTextFillColor: gold },
     subtitle: { fontSize: "1.9vmin", color: "#aeb8c4", marginTop: "0.4vmin" },
     counts: { fontSize: "1.7vmin", color: gold2, marginTop: "0.6vmin", letterSpacing: ".02em" },
-    grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 30vw), 1fr))", gap: "2vmin", alignContent: "start", position: "relative" },
-    card: { background: "linear-gradient(160deg, rgba(31,37,45,.92), rgba(19,23,28,.92))", border: "1px solid rgba(212,175,106,.28)", borderRadius: 18, padding: "1.8vmin 2vmin", boxShadow: "0 14px 40px rgba(0,0,0,.4)", animation: "fadeUp .7s ease both" },
+    grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(340px, 30vw), 1fr))", gap: "2vmin", alignContent: "start", position: "absolute", inset: 0 },
+    card: { background: "linear-gradient(160deg, rgba(31,37,45,.92), rgba(19,23,28,.92))", border: "1px solid rgba(212,175,106,.28)", borderRadius: 18, padding: "1.8vmin 2vmin", boxShadow: "0 14px 40px rgba(0,0,0,.4)", alignSelf: "start" },
     cardHead: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1.2vmin", paddingBottom: "1vmin", borderBottom: "1px solid rgba(212,175,106,.25)" },
     tableName: { fontFamily: "'Fraunces',Georgia,serif", fontSize: "2.9vmin", fontWeight: 600, color: gold2 },
     tableCount: { fontSize: "1.6vmin", color: "#8b97a5", fontWeight: 500 },
