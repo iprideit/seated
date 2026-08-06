@@ -239,7 +239,9 @@ export default function App() {
   };
   const updatePerson = async (id, patch) => {
     markEdit('person', id);
-    let next; setPeople(prev => prev.map(p => p.id === id ? (next = { ...p, ...patch, _ts: Date.now() }) : p));
+    const current = people.find(p => p.id === id);
+    const next = current ? { ...current, ...patch, _ts: Date.now() } : null;
+    setPeople(prev => prev.map(p => p.id === id ? { ...p, ...patch, _ts: Date.now() } : p));
     if (sb && next) try { await sb.upsertPerson({ id: next.id, token: next.token, name: next.name, email: next.email }); } catch (e) { notify(e.message); }
   };
   const removePerson = async (id) => {
@@ -322,7 +324,9 @@ export default function App() {
   };
   const updateTable = async (id, patch) => {
     markEdit('table', id);
-    let next; setTables(p => p.map(t => t.id === id ? (next = { ...t, ...patch, _ts: Date.now() }) : t));
+    const current = tables.find(t => t.id === id);
+    const next = current ? { ...current, ...patch, _ts: Date.now() } : null;
+    setTables(p => p.map(t => t.id === id ? { ...t, ...patch, _ts: Date.now() } : t));
     if (sb && next) try { await sb.upsertTable(next); } catch (e) { notify(e.message); }
   };
   const removeTable = async (id) => {
@@ -477,7 +481,9 @@ export default function App() {
   };
   const updateFixture = async (id, patch) => {
     markEdit('fixture', id);
-    let next; setFixtures(p => p.map(f => f.id === id ? (next = { ...f, ...patch, _ts: Date.now() }) : f));
+    const current = fixtures.find(f => f.id === id);
+    const next = current ? { ...current, ...patch, _ts: Date.now() } : null;
+    setFixtures(p => p.map(f => f.id === id ? { ...f, ...patch, _ts: Date.now() } : f));
     if (sb && next) try { await sb.upsertFixture(next); } catch (e) { notify(e.message); }
   };
   const removeFixture = async (id) => {
@@ -489,7 +495,9 @@ export default function App() {
   // ---- EVENT room settings (dimensions in feet, default table size in inches) ----
   const updateEvent = async (id, patch) => {
     markEdit('event', id);
-    let next; setEvents(p => p.map(e => e.id === id ? (next = { ...e, ...patch, _ts: Date.now() }) : e));
+    const current = events.find(e => e.id === id);
+    const next = current ? { ...current, ...patch, _ts: Date.now() } : null;
+    setEvents(p => p.map(e => e.id === id ? { ...e, ...patch, _ts: Date.now() } : e));
     if (sb && next) try { await sb.upsertEvent(next); } catch (e) { notify(e.message); }
   };
 
