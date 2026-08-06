@@ -103,6 +103,23 @@ export default function App() {
   const [activeEventId, setActiveEventId] = useState(null);
   const [sb, setSb] = useState(null);
   const [sbInfo, setSbInfo] = useState(() => {
+    // 1) A setup link carries the connection in the URL hash:
+    //    https://<site>/#connect=<base64 of {url,key}>
+    // This lets a coordinator/volunteer click one link and be connected,
+    // with no manual key entry. We save it to this device, then clean the URL.
+    try {
+      const h = window.location.hash || "";
+      const m = h.match(/connect=([^&]+)/);
+      if (m) {
+        const decoded = JSON.parse(decodeURIComponent(escape(atob(m[1]))));
+        if (decoded.url && decoded.key) {
+          try { window.localStorage.setItem("seated_supabase", JSON.stringify(decoded)); } catch {}
+          try { history.replaceState(null, "", window.location.pathname); } catch {}
+          return decoded;
+        }
+      }
+    } catch {}
+    // 2) Otherwise use whatever is saved on this device.
     try { const s = window.localStorage.getItem("seated_supabase"); if (s) return JSON.parse(s); } catch {}
     return { url: "", key: "" };
   });
@@ -762,6 +779,24 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
             <button style={{ ...S.ghostBtn, marginTop: 8, width: "100%" }} onClick={() => setSel(null)}>Done</button>
           </div>
         )}
+
+        <div style={{ ...S.toolTitle, marginTop: 14 }}>EXPORT</div>
+        <button style={S.toolBtn} onClick={async () => {
+          const XLSX = await import("xlsx");
+          const sortedT = [...tables].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+          const rows = [];
+          for (const t of sortedT) {
+            const occ = roster.filter(r => r.table_id === t.id).sort((a, b) => a.seat - b.seat);
+            const dims = t.shape === "rectangle" ? `${t.size_in || 60}in x ${t.len_in || 96}in` : `${t.size_in || 60}in`;
+            rows.push({ Table: t.name, Shape: t.shape, Size: dims, Seats: t.seats, "Position (ft)": `${Math.round(t.x_ft || 0)}, ${Math.round(t.y_ft || 0)}`, Seat: "", Guest: "", "Checked In": "" });
+            for (const r of occ) rows.push({ Table: "", Shape: "", Size: "", Seats: "", "Position (ft)": "", Seat: r.seat + 1, Guest: r.person.name, "Checked In": r.checked_in ? "yes" : "" });
+            rows.push({});
+          }
+          const ws = XLSX.utils.json_to_sheet(rows, { header: ["Table", "Shape", "Size", "Seats", "Position (ft)", "Seat", "Guest", "Checked In"] });
+          ws["!cols"] = [{ wch: 16 }, { wch: 10 }, { wch: 16 }, { wch: 7 }, { wch: 14 }, { wch: 6 }, { wch: 26 }, { wch: 11 }];
+          const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Table setup");
+          XLSX.writeFile(wb, `${event.name}-table-setup.xlsx`);
+        }}><Download size={16} /> Table setup</button>
 
         <div style={{ ...S.toolTitle, marginTop: 14 }}>UNSEATED ({unseated.length})</div>
         <div style={{ overflowY: "auto", maxHeight: 160 }}>
@@ -1452,6 +1487,20 @@ create policy "all" on fixtures for all using (true) with check (true);`;
       <h2 style={{ fontFamily: DISPLAY }}>Cloud Sync (Supabase)</h2>
       <p style={S.muted}>Connection is saved on this device. Devices auto-refresh every few seconds for near-live updates across iPads.</p>
       {sb && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--ok)", marginTop: 8 }}><span style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--ok)", fontWeight: 600 }}><Cloud size={16} /> Connected & saved on this device</span><button style={{ ...S.ghostBtn, borderColor: "#3a2326", color: "#ff9a9a" }} onClick={disconnect}>Disconnect</button></div>}
+
+      {sb && (
+        <div style={{ marginTop: 16, padding: 16, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--accent)" }}>
+          <b style={{ color: "var(--accent2)" }}>Share a one-click setup link</b>
+          <p style={S.muted}>Send this link to a coordinator or check-in volunteer. When they open it, the app connects automatically, no key to type. Anyone with the link can view and edit, so share only with your team.</p>
+          <button style={S.primaryBtn} onClick={() => {
+            try {
+              const payload = btoa(unescape(encodeURIComponent(JSON.stringify({ url: sbInfo.url, key: sbInfo.key }))));
+              const link = `${window.location.origin}${window.location.pathname}#connect=${payload}`;
+              navigator.clipboard.writeText(link).then(() => alert("Setup link copied! Paste it into a text or email to your team.")).catch(() => window.prompt("Copy this setup link:", link));
+            } catch (e) { alert("Could not create link: " + e.message); }
+          }}>Copy setup link</button>
+        </div>
+      )}
       <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
         <label style={S.lbl}>Project URL<input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://xxxx.supabase.co" style={S.field} /></label>
         <label style={S.lbl}>Anon public key<input value={key} onChange={e => setKey(e.target.value)} placeholder="eyJ..." style={S.field} /></label>
