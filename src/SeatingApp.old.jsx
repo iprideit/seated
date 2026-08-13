@@ -540,10 +540,10 @@ export default function App() {
         )}
         {activeEvent && view === "grid" && activeEvent.kind === "seated" && <TableGrid tables={evTables} roster={roster} />}
         {view === "people" && (
-          <PeopleManager people={people} events={events} attendance={attendance} activeEvent={activeEvent} addPerson={addPerson} updatePerson={updatePerson} removePerson={removePerson} addToEvent={addToEvent} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
+          <PeopleManager people={people} events={events} attendance={attendance} activeEvent={activeEvent} addPerson={addPerson} removePerson={removePerson} addToEvent={addToEvent} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
         )}
         {activeEvent && view === "roster" && (
-          <Roster event={activeEvent} roster={roster} tables={evTables} assignSeat={assignSeat} updateAttendance={updateAttendance} updatePerson={updatePerson} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
+          <Roster event={activeEvent} roster={roster} tables={evTables} assignSeat={assignSeat} updateAttendance={updateAttendance} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
         )}
         {activeEvent && view === "qr" && <QrCenter roster={roster} tables={evTables} event={activeEvent} notify={notify} />}
         {activeEvent && view === "scan" && (
@@ -1113,31 +1113,7 @@ function DisplayBoard({ event, tables, roster, onExit }) {
 // ============================================================
 //  People manager
 // ============================================================
-// Inline click-to-edit text cell. Shows the value; click to edit; saves on
-// blur or Enter; Escape cancels. Used for editing emails (and names) in place.
-function EditableText({ value, placeholder, onSave, muted }) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(value || "");
-  useEffect(() => { if (!editing) setVal(value || ""); }, [value, editing]);
-  const commit = () => { setEditing(false); if ((val || "") !== (value || "")) onSave(val.trim()); };
-  if (editing) {
-    return (
-      <input autoFocus value={val} placeholder={placeholder}
-        onChange={e => setVal(e.target.value)}
-        onBlur={commit}
-        onKeyDown={e => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") { setVal(value || ""); setEditing(false); } }}
-        style={{ ...S.field, padding: "6px 9px", width: "100%", maxWidth: 280 }} />
-    );
-  }
-  return (
-    <span onClick={() => setEditing(true)} title="Click to edit"
-      style={{ cursor: "text", ...(muted && !value ? { color: "var(--muted)" } : {}), borderBottom: "1px dashed var(--line)", paddingBottom: 1 }}>
-      {value || placeholder || "—"}
-    </span>
-  );
-}
-
-function PeopleManager({ people, events, attendance, activeEvent, addPerson, updatePerson, removePerson, addToEvent, removeFromEvent, importPeople, notify }) {
+function PeopleManager({ people, events, attendance, activeEvent, addPerson, removePerson, addToEvent, removeFromEvent, importPeople, notify }) {
   const [name, setName] = useState(""); const [email, setEmail] = useState("");
   const fileRef = useRef(null);
   const importFile = async (file) => {
@@ -1163,7 +1139,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, upd
           {[...people].sort((a, b) => a.name.localeCompare(b.name)).map(p => (
             <tr key={p.id} style={S.tr}>
               <td style={S.td}>{p.name}</td>
-              <td style={{ ...S.td, ...S.muted }}><EditableText value={p.email} placeholder="add email" muted onSave={(v) => updatePerson(p.id, { email: v })} /></td>
+              <td style={{ ...S.td, ...S.muted }}>{p.email || "—"}</td>
               {events.map(e => {
                 const a = attendance.find(x => x.person_id === p.id && x.event_id === e.id);
                 const state = !a ? "out" : (a.checked_in ? "in" : "invited");
@@ -1194,7 +1170,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, upd
 // ============================================================
 //  Roster
 // ============================================================
-function Roster({ event, roster, tables, assignSeat, updateAttendance, updatePerson, removeFromEvent, importPeople, notify }) {
+function Roster({ event, roster, tables, assignSeat, updateAttendance, removeFromEvent, importPeople, notify }) {
   const seated = event.kind === "seated";
   const fileRef = useRef(null);
   const [conflicts, setConflicts] = useState([]);
@@ -1283,7 +1259,7 @@ function Roster({ event, roster, tables, assignSeat, updateAttendance, updatePer
             return (
               <tr key={r.id} style={S.tr}>
                 <td style={S.td}>{r.person.name}</td>
-                <td style={{ ...S.td, ...S.muted }}><EditableText value={r.person.email} placeholder="add email" muted onSave={(v) => updatePerson(r.person_id, { email: v })} /></td>
+                <td style={{ ...S.td, ...S.muted }}>{r.person.email || "—"}</td>
                 {seated && <td style={S.td}>
                   <select value={r.table_id || ""} onChange={async e => { const tid = e.target.value || null; if (!tid) { await assignSeat(r.person_id, null, null); return; } const occupied = roster.filter(x => x.table_id === tid).map(x => x.seat); const tt = tables.find(x => x.id === tid); let s = 0; while (occupied.includes(s) && s < tt.seats) s++; await assignSeat(r.person_id, tid, s); }} style={S.select}>
                     <option value="">— none —</option>{tables.map(tt => <option key={tt.id} value={tt.id}>{tt.name}</option>)}
