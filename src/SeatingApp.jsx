@@ -1204,7 +1204,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, upd
 // ============================================================
 //  Roster
 // ============================================================
-function Roster({ event, roster, tables, assignSeat, updateAttendance, updatePerson, removeFromEvent, importPeople, notify }) {
+function Roster({ event, roster, tables, assignSeat, updateAttendance, updatePerson, removeFromEvent, importPeople, notify, isVolunteer }) {
   const seated = event.kind === "seated";
   const fileRef = useRef(null);
   const [conflicts, setConflicts] = useState([]);
