@@ -103,10 +103,10 @@ export default function App() {
   const [activeEventId, setActiveEventId] = useState(null);
   const [sb, setSb] = useState(null);
   const [sbInfo, setSbInfo] = useState(() => {
-    // A setup link carries the connection in the URL hash:
-    //   admin:     #connect=<base64 {url,key}>
-    //   volunteer: #connect=<base64 {url,key,role:"volunteer"}>
-    // Clicking connects automatically; we save it to this device and clean the URL.
+    // 1) A setup link carries the connection in the URL hash:
+    //    https://<site>/#connect=<base64 of {url,key}>
+    // This lets a coordinator/volunteer click one link and be connected,
+    // with no manual key entry. We save it to this device, then clean the URL.
     try {
       const h = window.location.hash || "";
       const m = h.match(/connect=([^&]+)/);
@@ -119,11 +119,10 @@ export default function App() {
         }
       }
     } catch {}
+    // 2) Otherwise use whatever is saved on this device.
     try { const s = window.localStorage.getItem("seated_supabase"); if (s) return JSON.parse(s); } catch {}
     return { url: "", key: "" };
   });
-  const role = sbInfo.role === "volunteer" ? "volunteer" : "admin";
-  const isVolunteer = role === "volunteer";
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
   // Per-row edit tracking: rows we changed in the last few seconds are protected
@@ -520,42 +519,38 @@ export default function App() {
   const roster = evAttendance.map(a => ({ ...a, person: people.find(p => p.id === a.person_id) })).filter(r => r.person);
   const stats = { total: roster.length, seated: roster.filter(r => r.table_id != null).length, checkedIn: roster.filter(r => r.checked_in).length };
 
-  // Volunteers may not reach admin-only views even via a stale saved view.
-  const blockedForVolunteer = ["events", "settings", "display"];
-  const safeView = isVolunteer && blockedForVolunteer.includes(view) ? "roster" : view;
-
-  // Full-screen TV display board — admins only.
-  if (safeView === "display" && activeEvent && !isVolunteer) {
+  // Full-screen TV display board — no header, takes over the screen.
+  if (view === "display" && activeEvent) {
     return <DisplayBoard event={activeEvent} tables={evTables} roster={roster} onExit={() => setView("grid")} />;
   }
 
   return (
     <div style={S.root}>
       <style>{CSSVARS}</style>
-      <Header view={safeView} setView={setView} sb={sb} loading={loading} stats={stats}
-        events={events} activeEvent={activeEvent} setActiveEventId={setActiveEventId} onRefresh={() => refresh(sb)} isVolunteer={isVolunteer} />
+      <Header view={view} setView={setView} sb={sb} loading={loading} stats={stats}
+        events={events} activeEvent={activeEvent} setActiveEventId={setActiveEventId} onRefresh={() => refresh(sb)} />
       <main style={S.main}>
-        {!activeEvent && safeView !== "settings" && safeView !== "people" && safeView !== "events" && <NoEvent onCreate={addEvent} />}
-        {activeEvent && safeView === "floor" && activeEvent.kind === "seated" && (
+        {!activeEvent && view !== "settings" && view !== "people" && view !== "events" && <NoEvent onCreate={addEvent} />}
+        {activeEvent && view === "floor" && activeEvent.kind === "seated" && (
           <FloorPlan event={activeEvent} tables={evTables} fixtures={fixtures.filter(f => f.event_id === activeEventId)}
             roster={roster} people={people}
             addTable={addTable} updateTable={updateTable} removeTable={removeTable}
             addFixture={addFixture} updateFixture={updateFixture} removeFixture={removeFixture}
-            updateEvent={updateEvent} assignSeat={assignSeat} notify={notify} readOnly={isVolunteer} />
+            updateEvent={updateEvent} assignSeat={assignSeat} notify={notify} />
         )}
-        {activeEvent && safeView === "grid" && activeEvent.kind === "seated" && <TableGrid tables={evTables} roster={roster} />}
-        {safeView === "people" && (
-          <PeopleManager people={people} events={events} attendance={attendance} activeEvent={activeEvent} addPerson={addPerson} updatePerson={updatePerson} removePerson={removePerson} addToEvent={addToEvent} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} readOnly={isVolunteer} />
+        {activeEvent && view === "grid" && activeEvent.kind === "seated" && <TableGrid tables={evTables} roster={roster} />}
+        {view === "people" && (
+          <PeopleManager people={people} events={events} attendance={attendance} activeEvent={activeEvent} addPerson={addPerson} updatePerson={updatePerson} removePerson={removePerson} addToEvent={addToEvent} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
         )}
-        {activeEvent && safeView === "roster" && (
-          <Roster event={activeEvent} roster={roster} tables={evTables} assignSeat={assignSeat} updateAttendance={updateAttendance} updatePerson={updatePerson} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} isVolunteer={isVolunteer} />
+        {activeEvent && view === "roster" && (
+          <Roster event={activeEvent} roster={roster} tables={evTables} assignSeat={assignSeat} updateAttendance={updateAttendance} updatePerson={updatePerson} removeFromEvent={removeFromEvent} importPeople={importPeople} notify={notify} />
         )}
-        {activeEvent && safeView === "qr" && <QrCenter roster={roster} tables={evTables} event={activeEvent} notify={notify} />}
-        {activeEvent && safeView === "scan" && (
+        {activeEvent && view === "qr" && <QrCenter roster={roster} tables={evTables} event={activeEvent} notify={notify} />}
+        {activeEvent && view === "scan" && (
           <Scanner event={activeEvent} checkInByToken={checkInByToken} roster={roster} tables={evTables} addPerson={addPerson} addToEvent={addToEvent} assignSeat={assignSeat} updateAttendance={updateAttendance} attFor={attFor} notify={notify} />
         )}
-        {safeView === "events" && !isVolunteer && <EventsManager events={events} addEvent={addEvent} removeEvent={removeEvent} updateEvent={updateEvent} activeEventId={activeEventId} setActiveEventId={setActiveEventId} attendance={attendance} />}
-        {safeView === "settings" && !isVolunteer && <SettingsPanel sb={sb} sbInfo={sbInfo} connect={connectSupabase} disconnect={disconnectSupabase} />}
+        {view === "events" && <EventsManager events={events} addEvent={addEvent} removeEvent={removeEvent} updateEvent={updateEvent} activeEventId={activeEventId} setActiveEventId={setActiveEventId} attendance={attendance} />}
+        {view === "settings" && <SettingsPanel sb={sb} sbInfo={sbInfo} connect={connectSupabase} disconnect={disconnectSupabase} />}
       </main>
       {toast && <div style={S.toast}>{toast}</div>}
     </div>
@@ -565,19 +560,19 @@ export default function App() {
 // ============================================================
 //  Header
 // ============================================================
-function Header({ view, setView, sb, loading, stats, events, activeEvent, setActiveEventId, onRefresh, isVolunteer }) {
+function Header({ view, setView, sb, loading, stats, events, activeEvent, setActiveEventId, onRefresh }) {
   const [open, setOpen] = useState(false);
   const seated = activeEvent?.kind === "seated";
   const items = [
     seated && ["floor", "Floor Plan", LayoutGrid],
     seated && ["grid", "Table Grid", Grid3x3],
-    seated && !isVolunteer && ["display", "TV Display", Monitor],
+    seated && ["display", "TV Display", Monitor],
     ["people", "People", Users],
     activeEvent && ["roster", "Roster", Grid3x3],
     activeEvent && ["qr", "QR Codes", QrCode],
     activeEvent && ["scan", "Check-In", Camera],
-    !isVolunteer && ["events", "Events", Calendar],
-    !isVolunteer && ["settings", "Settings", Settings],
+    ["events", "Events", Calendar],
+    ["settings", "Settings", Settings],
   ].filter(Boolean);
   return (
     <header style={S.header}>
@@ -594,7 +589,7 @@ function Header({ view, setView, sb, loading, stats, events, activeEvent, setAct
               {events.map(e => (
                 <button key={e.id} style={S.eventMenuItem} onClick={() => { setActiveEventId(e.id); setOpen(false); }}>{e.name} <span style={S.eventKind}>{e.kind}</span></button>
               ))}
-              {!isVolunteer && <button style={{ ...S.eventMenuItem, color: "var(--accent2)" }} onClick={() => { setView("events"); setOpen(false); }}>+ Manage events</button>}
+              <button style={{ ...S.eventMenuItem, color: "var(--accent2)" }} onClick={() => { setView("events"); setOpen(false); }}>+ Manage events</button>
             </div>
           )}
         </div>
@@ -682,7 +677,7 @@ function EventsManager({ events, addEvent, removeEvent, updateEvent, activeEvent
 // len_in = length for rectangles). Everything is drawn at a computed
 // pixels-per-foot scale so the layout is a faithful representation.
 function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTable, removeTable,
-                     addFixture, updateFixture, removeFixture, updateEvent, assignSeat, notify, readOnly }) {
+                     addFixture, updateFixture, removeFixture, updateEvent, assignSeat, notify }) {
   const areaRef = useRef(null);
   const [drag, setDrag] = useState(null);       // {kind:'table'|'fixture', id, dxFt, dyFt}
   const [picker, setPicker] = useState(null);
@@ -713,7 +708,6 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
   const doSnap = (v) => snap ? Math.round(v / snapFt) * snapFt : v;
 
   const startDrag = (e, kind, item) => {
-    if (readOnly) return;                        // volunteers can't move anything
     const rect = areaRef.current.getBoundingClientRect();
     const originX = rect.left + (rect.width - roomPxW) / 2;
     const originY = rect.top + (rect.height - roomPxH) / 2;
@@ -748,8 +742,6 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
   return (
     <div style={{ display: "flex", height: "100%" }}>
       <div style={{ ...S.toolbar, width: 262, overflowY: "auto" }}>
-        {readOnly && <div style={{ ...S.toolTitle, color: "var(--accent2)" }}>VIEW ONLY</div>}
-        {!readOnly && <>
         <div style={S.toolTitle}>ROOM SIZE (FEET)</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input type="number" min="10" value={roomW} onChange={e => updateEvent(event.id, { room_w_ft: Number(e.target.value) || 0 })} style={{ ...S.field, width: 78 }} />
@@ -795,7 +787,6 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
             <button style={{ ...S.ghostBtn, marginTop: 8, width: "100%" }} onClick={() => setSel(null)}>Done</button>
           </div>
         )}
-        </>}
 
         <div style={{ ...S.toolTitle, marginTop: 14 }}>EXPORT</div>
         <button style={S.toolBtn} onClick={async () => {
@@ -852,9 +843,9 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
 
           {/* tables */}
           {tables.map(t => (
-            <TableNode key={t.id} t={t} roster={roster} scale={scale} readOnly={readOnly}
+            <TableNode key={t.id} t={t} roster={roster} scale={scale}
               onDown={(e) => startDrag(e, "table", t)}
-              onSeat={readOnly ? undefined : (seat) => setPicker({ tableId: t.id, seat })}
+              onSeat={(seat) => setPicker({ tableId: t.id, seat })}
               onRemove={() => removeTable(t.id)}
               onRename={(name) => updateTable(t.id, { name })}
               onSeats={(seats) => updateTable(t.id, { seats: Math.max(1, Math.min(24, seats)) })}
@@ -879,7 +870,7 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
   );
 }
 
-function TableNode({ t, roster, scale, readOnly, onDown, onSeat, onRemove, onRename, onSeats, onSize }) {
+function TableNode({ t, roster, scale, onDown, onSeat, onRemove, onRename, onSeats, onSize }) {
   // Real dimensions, inches -> feet -> pixels
   const sizeIn = Number(t.size_in) || 60;
   const lenIn = Number(t.len_in) || sizeIn;
@@ -899,8 +890,8 @@ function TableNode({ t, roster, scale, readOnly, onDown, onSeat, onRemove, onRen
   return (
     <div style={{ position: "absolute", left: (Number(t.x_ft) || 0) * scale, top: (Number(t.y_ft) || 0) * scale, transform: "translate(-50%,-50%)" }}>
       <div style={{ position: "relative", width: w, height: h }}>
-        <div onPointerDown={readOnly ? undefined : onDown} onDoubleClick={readOnly ? undefined : () => setOpen(o => !o)}
-          style={{ width: w, height: h, cursor: readOnly ? "default" : "grab", borderRadius: t.shape === "round" ? "50%" : 6,
+        <div onPointerDown={onDown} onDoubleClick={() => setOpen(o => !o)}
+          style={{ width: w, height: h, cursor: "grab", borderRadius: t.shape === "round" ? "50%" : 6,
             background: "linear-gradient(145deg,var(--surface2),var(--surface))", border: "2px solid var(--line)",
             boxShadow: "0 6px 18px rgba(0,0,0,.4)", display: "flex", alignItems: "center", justifyContent: "center", userSelect: "none", overflow: "hidden" }}>
           <span style={{ fontSize: fontPx, fontWeight: 600, color: "var(--text)", textAlign: "center", padding: 2, lineHeight: 1.1 }}>{t.name}</span>
@@ -910,9 +901,9 @@ function TableNode({ t, roster, scale, readOnly, onDown, onSeat, onRemove, onRen
         {pts.map((p, i) => {
           const r = occBy(i); const color = r ? (r.checked_in ? "var(--ok)" : "var(--accent)") : "var(--line)";
           return (
-            <button key={i} onPointerDown={e => e.stopPropagation()} onClick={readOnly ? undefined : () => onSeat(i)} title={r ? r.person.name : "Empty"}
+            <button key={i} onPointerDown={e => e.stopPropagation()} onClick={() => onSeat(i)} title={r ? r.person.name : "Empty"}
               style={{ position: "absolute", left: p.x, top: p.y, transform: "translate(-50%,-50%)", width: seatPx, height: seatPx,
-                borderRadius: "50%", cursor: readOnly ? "default" : "pointer", fontSize: Math.max(6, seatPx * 0.42), fontWeight: 700,
+                borderRadius: "50%", cursor: "pointer", fontSize: Math.max(6, seatPx * 0.42), fontWeight: 700,
                 border: "1px solid " + color, background: r ? color : "var(--surface)", color: r ? "#0a0a0a" : "var(--dim)",
                 display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
               {r ? (r.checked_in ? "✓" : initials(r.person.name)) : i + 1}
@@ -920,8 +911,8 @@ function TableNode({ t, roster, scale, readOnly, onDown, onSeat, onRemove, onRen
           );
         })}
 
-        {/* double-click editor (admins only) */}
-        {open && !readOnly && (
+        {/* double-click editor */}
+        {open && (
           <div onPointerDown={e => e.stopPropagation()}
             style={{ position: "absolute", top: h / 2 + 14, left: "50%", transform: "translateX(-50%)", zIndex: 20,
               background: "var(--surface)", border: "1px solid var(--accent)", borderRadius: 10, padding: 10, width: 190, boxShadow: "0 12px 30px rgba(0,0,0,.5)" }}>
@@ -1146,7 +1137,7 @@ function EditableText({ value, placeholder, onSave, muted }) {
   );
 }
 
-function PeopleManager({ people, events, attendance, activeEvent, addPerson, updatePerson, removePerson, addToEvent, removeFromEvent, importPeople, notify, readOnly }) {
+function PeopleManager({ people, events, attendance, activeEvent, addPerson, updatePerson, removePerson, addToEvent, removeFromEvent, importPeople, notify }) {
   const [name, setName] = useState(""); const [email, setEmail] = useState("");
   const fileRef = useRef(null);
   const importFile = async (file) => {
@@ -1158,31 +1149,30 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, upd
   };
   return (
     <div style={{ padding: 24, height: "100%", overflowY: "auto" }}>
-      {!readOnly && <div style={S.addBar}>
+      <div style={S.addBar}>
         <input placeholder="Person name" value={name} onChange={e => setName(e.target.value)} style={S.field} />
         <input placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} style={S.field} />
         <button style={S.primaryBtn} onClick={async () => { if (!name.trim()) return; const p = await addPerson({ name: name.trim(), email: email.trim() }); if (activeEvent) await addToEvent(p.id, activeEvent.id); setName(""); setEmail(""); }}><Plus size={16} /> Add</button>
         <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={e => e.target.files[0] && importFile(e.target.files[0])} />
         <button style={S.ghostBtn} onClick={() => fileRef.current.click()}><Upload size={16} /> Import Excel/CSV</button>
-      </div>}
-      {readOnly && <div style={{ ...S.importHint, marginBottom: 12 }}>View only. This is the master guest list.</div>}
-      {!readOnly && <div style={S.importHint}>Columns: <b>Name</b>, <b>Email</b>, <b>Table</b> (optional), <b>Seat</b> (optional). Imports into <b>{activeEvent ? activeEvent.name : "…select an event"}</b>. Missing tables are created automatically; existing people are matched by email and updated. Blank seat = first open seat.</div>}
+      </div>
+      <div style={S.importHint}>Columns: <b>Name</b>, <b>Email</b>, <b>Table</b> (optional), <b>Seat</b> (optional). Imports into <b>{activeEvent ? activeEvent.name : "…select an event"}</b>. Missing tables are created automatically; existing people are matched by email and updated. Blank seat = first open seat.</div>
       <table style={S.table}>
         <thead><tr><th style={S.th}>Name</th><th style={S.th}>Email</th>{events.map(e => <th key={e.id} style={{ ...S.th, textAlign: "center" }}>{e.name}</th>)}<th style={S.th}></th></tr></thead>
         <tbody>
           {[...people].sort((a, b) => a.name.localeCompare(b.name)).map(p => (
             <tr key={p.id} style={S.tr}>
               <td style={S.td}>{p.name}</td>
-              <td style={{ ...S.td, ...S.muted }}>{readOnly ? (p.email || "—") : <EditableText value={p.email} placeholder="add email" muted onSave={(v) => updatePerson(p.id, { email: v })} />}</td>
+              <td style={{ ...S.td, ...S.muted }}><EditableText value={p.email} placeholder="add email" muted onSave={(v) => updatePerson(p.id, { email: v })} /></td>
               {events.map(e => {
                 const a = attendance.find(x => x.person_id === p.id && x.event_id === e.id);
                 const state = !a ? "out" : (a.checked_in ? "in" : "invited");
-                const title = state === "out" ? "Not invited" : state === "in" ? "Checked in" : "Invited";
+                const title = state === "out" ? "Not invited, click to invite" : state === "in" ? "Checked in, click to remove from event" : "Invited, click to remove from event";
                 return (
                   <td key={e.id} style={{ ...S.td, textAlign: "center" }}>
-                    <button title={title} disabled={readOnly}
-                      onClick={readOnly ? undefined : async () => { if (a) await removeFromEvent(a.id); else await addToEvent(p.id, e.id); }}
-                      style={{ width: 26, height: 26, borderRadius: "50%", cursor: readOnly ? "default" : "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    <button title={title}
+                      onClick={async () => { if (a) await removeFromEvent(a.id); else await addToEvent(p.id, e.id); }}
+                      style={{ width: 26, height: 26, borderRadius: "50%", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center",
                         border: state === "out" ? "1px solid var(--line)" : "none",
                         background: state === "in" ? "var(--ok)" : state === "invited" ? "var(--accent)" : "transparent",
                         color: state === "out" ? "var(--muted)" : "#0a0a0a" }}>
@@ -1191,7 +1181,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, upd
                   </td>
                 );
               })}
-              <td style={S.td}>{!readOnly && <button onClick={() => removePerson(p.id)} style={S.iconBtn}><Trash2 size={15} /></button>}</td>
+              <td style={S.td}><button onClick={() => removePerson(p.id)} style={S.iconBtn}><Trash2 size={15} /></button></td>
             </tr>
           ))}
           {people.length === 0 && <tr><td colSpan={3 + events.length} style={{ ...S.td, ...S.muted, textAlign: "center", padding: 40 }}>No people yet, add or import.</td></tr>}
@@ -1261,7 +1251,7 @@ function Roster({ event, roster, tables, assignSeat, updateAttendance, updatePer
         <h2 style={{ fontFamily: DISPLAY, marginTop: 0, marginBottom: 0 }}>{event.name} <span style={S.eventKind}>{event.kind}</span></h2>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={e => e.target.files[0] && importFile(e.target.files[0])} />
-          {!isVolunteer && <button style={S.ghostBtn} onClick={() => fileRef.current.click()}><Upload size={16} /> Import seating</button>}
+          <button style={S.ghostBtn} onClick={() => fileRef.current.click()}><Upload size={16} /> Import seating</button>
           <button style={S.ghostBtn} onClick={exportAlpha}><Download size={16} /> Check-in (A–Z)</button>
           <button style={S.ghostBtn} onClick={exportByTable}><Download size={16} /> By table</button>
         </div>
@@ -1541,18 +1531,6 @@ create policy "all" on fixtures for all using (true) with check (true);`;
               navigator.clipboard.writeText(link).then(() => alert("Setup link copied! Paste it into a text or email to your team.")).catch(() => window.prompt("Copy this setup link:", link));
             } catch (e) { alert("Could not create link: " + e.message); }
           }}>Copy setup link</button>
-
-          <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
-            <b style={{ color: "var(--accent2)" }}>Volunteer link (limited access)</b>
-            <p style={S.muted}>For door volunteers. They can check people in, assign seats on the Roster, view QR codes, and view the floor plan, but cannot move tables, edit the room, see the TV Display, or reach Events/Settings.</p>
-            <button style={S.ghostBtn} onClick={() => {
-              try {
-                const payload = btoa(unescape(encodeURIComponent(JSON.stringify({ url: sbInfo.url, key: sbInfo.key, role: "volunteer" }))));
-                const link = `${window.location.origin}${window.location.pathname}#connect=${payload}`;
-                navigator.clipboard.writeText(link).then(() => alert("Volunteer link copied! Send it to your check-in volunteers.")).catch(() => window.prompt("Copy this volunteer link:", link));
-              } catch (e) { alert("Could not create link: " + e.message); }
-            }}>Copy volunteer link</button>
-          </div>
         </div>
       )}
       <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
