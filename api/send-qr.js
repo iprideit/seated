@@ -36,21 +36,53 @@ export default async function handler(req, res) {
     const base64 = String(qrPng).replace(/^data:image\/png;base64,/, "");
 
     const seatLine = table
-      ? `<p style="margin:0 0 4px"><strong>Your seat:</strong> ${table}${seat ? `, Seat ${seat}` : ""}</p>`
+      ? `<div style="background:#faf5ea;border:1px solid #e8d9b0;border-radius:10px;padding:14px 18px;margin:0 0 20px;text-align:center">
+           <div style="font-size:12px;letter-spacing:2px;color:#9a7b3a;text-transform:uppercase;margin-bottom:4px">Your Seat</div>
+           <div style="font-size:20px;font-weight:700;color:#1a1a1a">${table}${seat ? ` &middot; Seat ${seat}` : ""}</div>
+         </div>`
       : "";
 
     const html = `
-      <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#222">
-        <h2 style="margin:0 0 12px">You're confirmed!</h2>
-        <p style="margin:0 0 8px">Hi ${name || "there"},</p>
-        <p style="margin:0 0 12px">Please present this QR code at check-in:</p>
-        ${seatLine}
-        <div style="text-align:center;margin:18px 0">
-          <img src="cid:qrcode" alt="Your QR code" width="220" height="220"
-               style="border:1px solid #eee;border-radius:8px"/>
+      <div style="margin:0;padding:0;background:#0e1117">
+        <div style="font-family:Georgia,'Times New Roman',serif;max-width:520px;margin:0 auto;background:#141821;border-radius:16px;overflow:hidden;border:1px solid #2a2f3a">
+
+          <!-- Header -->
+          <div style="background:linear-gradient(135deg,#1a1f2b,#0e1117);padding:34px 24px 26px;text-align:center;border-bottom:2px solid #d4af6a">
+            <div style="font-size:12px;letter-spacing:4px;color:#d4af6a;text-transform:uppercase;margin-bottom:10px;font-family:Arial,sans-serif">NAGAAA &middot; Est. 1997</div>
+            <div style="font-size:26px;font-weight:700;color:#f5e9cf;line-height:1.25">Hall of Fame Dinner<br/><span style="color:#d4af6a;font-style:italic">&amp;</span> iPride Honors</div>
+          </div>
+
+          <!-- Body -->
+          <div style="padding:30px 30px 34px;font-family:Arial,sans-serif;color:#e6e9ef">
+            <p style="font-size:18px;margin:0 0 6px;color:#f5e9cf;font-family:Georgia,serif">You're on the list, ${name || "friend"}! 🎉</p>
+            <p style="font-size:15px;line-height:1.55;margin:0 0 22px;color:#aeb6c2">
+              We can't wait to celebrate with you. This is your personal check-in pass, just have it ready on your phone when you arrive and we'll get you to your seat in seconds.
+            </p>
+
+            ${seatLine}
+
+            <div style="text-align:center;margin:8px 0 6px">
+              <div style="display:inline-block;background:#ffffff;padding:16px;border-radius:14px;box-shadow:0 6px 20px rgba(0,0,0,.35)">
+                <img src="cid:qrcode" alt="Your check-in QR code" width="220" height="220" style="display:block"/>
+              </div>
+            </div>
+            <p style="text-align:center;margin:14px 0 0;color:#7f8794;font-size:11px;font-family:Arial,sans-serif">Check-in code: ${token || ""}</p>
+
+            <div style="margin:26px 0 0;padding:16px 18px;background:#11151d;border-radius:10px;border-left:3px solid #d4af6a">
+              <p style="margin:0;font-size:13px;line-height:1.5;color:#aeb6c2;font-family:Arial,sans-serif">
+                <strong style="color:#d4af6a">Tip:</strong> Save this email or screenshot the code so it's handy at the door. One quick scan and you're in.
+              </p>
+            </div>
+
+            <p style="margin:26px 0 0;font-size:16px;color:#f5e9cf;font-family:Georgia,serif;text-align:center">See you there! ✨</p>
+          </div>
+
+          <!-- Footer -->
+          <div style="background:#0e1117;padding:18px 24px;text-align:center;border-top:1px solid #2a2f3a">
+            <p style="margin:0;color:#6b7280;font-size:11px;font-family:Arial,sans-serif">iPride Softball &middot; Hall of Fame Dinner &amp; iPride Honors</p>
+          </div>
+
         </div>
-        <p style="margin:0;color:#666;font-size:12px">Code ID: ${token || ""}</p>
-        <p style="margin:16px 0 0">See you there!</p>
       </div>`;
 
     const resp = await fetch("https://api.resend.com/emails", {
@@ -60,9 +92,9 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: fromEmail,
+        from: `iPride Honors <${fromEmail}>`,
         to: [to],
-        subject: "Your Event Check-In QR Code",
+        subject: "Here's your ticket to the Hall of Fame Dinner & iPride Honors 🎟️",
         html,
         attachments: [
           {
