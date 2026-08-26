@@ -1172,7 +1172,7 @@ function PeopleManager({ people, events, attendance, activeEvent, addPerson, upd
         <tbody>
           {[...people].sort((a, b) => a.name.localeCompare(b.name)).map(p => (
             <tr key={p.id} style={S.tr}>
-              <td style={S.td}>{p.name}</td>
+              <td style={S.td}>{readOnly ? p.name : <EditableText value={p.name} placeholder="name" onSave={(v) => { if (v) updatePerson(p.id, { name: v }); }} />}</td>
               <td style={{ ...S.td, ...S.muted }}>{readOnly ? (p.email || "—") : <EditableText value={p.email} placeholder="add email" muted onSave={(v) => updatePerson(p.id, { email: v })} />}</td>
               {events.map(e => {
                 const a = attendance.find(x => x.person_id === p.id && x.event_id === e.id);
@@ -1292,7 +1292,7 @@ function Roster({ event, roster, tables, assignSeat, updateAttendance, updatePer
             const t = tables.find(x => x.id === r.table_id);
             return (
               <tr key={r.id} style={S.tr}>
-                <td style={S.td}>{r.person.name}</td>
+                <td style={S.td}>{isVolunteer ? r.person.name : <EditableText value={r.person.name} placeholder="name" onSave={(v) => { if (v) updatePerson(r.person_id, { name: v }); }} />}</td>
                 <td style={{ ...S.td, ...S.muted }}><EditableText value={r.person.email} placeholder="add email" muted onSave={(v) => updatePerson(r.person_id, { email: v })} /></td>
                 {seated && <td style={S.td}>
                   <select value={r.table_id || ""} onChange={async e => { const tid = e.target.value || null; if (!tid) { await assignSeat(r.person_id, null, null); return; } const occupied = roster.filter(x => x.table_id === tid).map(x => x.seat); const tt = tables.find(x => x.id === tid); let s = 0; while (occupied.includes(s) && s < tt.seats) s++; await assignSeat(r.person_id, tid, s); }} style={S.select}>

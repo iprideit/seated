@@ -816,8 +816,10 @@ function FloorPlan({ event, tables, fixtures, roster, people, addTable, updateTa
         }}><Download size={16} /> Table setup</button>
 
         <div style={{ ...S.toolTitle, marginTop: 14 }}>UNSEATED ({unseated.length})</div>
-        <div style={{ overflowY: "auto", maxHeight: 160 }}>
-          {unseated.map(r => <div key={r.id} style={{ ...S.unseatChip, borderColor: r.checked_in ? "var(--ok)" : "var(--line)" }}>{r.person.name}{r.checked_in ? " ✓" : ""}</div>)}
+        <div style={{ overflowY: "auto", maxHeight: 220, minHeight: 44, flexShrink: 0 }}>
+          {[...unseated].sort((a, b) => a.person.name.localeCompare(b.person.name)).map(r => (
+            <div key={r.id} style={{ ...S.unseatChip, borderColor: r.checked_in ? "var(--ok)" : "var(--line)" }}>{r.person.name}{r.checked_in ? " ✓" : ""}</div>
+          ))}
           {unseated.length === 0 && <div style={S.muted}>Everyone seated</div>}
         </div>
         <div style={S.hint}>Room shown to scale. Drag tables and fixtures. Click a fixture to resize it.</div>
