@@ -61,6 +61,24 @@ export default async function handler(req, res) {
 
             ${seatLine}
 
+            <!-- Event details: when & where -->
+            <div style="background:#11151d;border:1px solid #2a2f3a;border-radius:10px;padding:16px 18px;margin:0 0 20px">
+              <table style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif">
+                <tr>
+                  <td style="padding:0 0 10px;vertical-align:top;width:70px;color:#d4af6a;font-size:12px;letter-spacing:1px;text-transform:uppercase">When</td>
+                  <td style="padding:0 0 10px;vertical-align:top;color:#e6e9ef;font-size:14px">Happy Hour begins at 5:30 PM</td>
+                </tr>
+                <tr>
+                  <td style="padding:0;vertical-align:top;color:#d4af6a;font-size:12px;letter-spacing:1px;text-transform:uppercase">Where</td>
+                  <td style="padding:0;vertical-align:top;color:#e6e9ef;font-size:14px">
+                    Columbus Museum of Art<br/>
+                    <span style="color:#aeb6c2">480 E Broad St, Columbus, OH 43215</span><br/>
+                    <a href="https://maps.google.com/?q=Columbus+Museum+of+Art+480+E+Broad+St+Columbus+OH+43215" style="color:#d4af6a;font-size:13px;text-decoration:underline">Get directions</a>
+                  </td>
+                </tr>
+              </table>
+            </div>
+
             <div style="text-align:center;margin:8px 0 6px">
               <div style="display:inline-block;background:#ffffff;padding:16px;border-radius:14px;box-shadow:0 6px 20px rgba(0,0,0,.35)">
                 <img src="cid:qrcode" alt="Your check-in QR code" width="220" height="220" style="display:block"/>
